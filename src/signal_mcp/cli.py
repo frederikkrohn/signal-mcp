@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 
 from . import __version__, store as _store
-from .client import SignalClient, SignalError
+from .client import _E164_RE, SignalClient, SignalError
 from .config import DAEMON_PORT, detect_account
 
 
@@ -291,7 +291,7 @@ def edit(recipient: str, timestamp: int, message: str):
     async def _run():
         async with SignalClient() as client:
             await client.ensure_daemon()
-            if recipient.startswith("+"):
+            if _E164_RE.match(recipient):
                 await client.edit_message(timestamp, message, recipient=recipient)
             else:
                 await client.edit_message(timestamp, message, group_id=recipient)
@@ -316,7 +316,7 @@ def react(recipient: str, timestamp: int, author: str, emoji: str, remove: bool)
     async def _run():
         async with SignalClient() as client:
             await client.ensure_daemon()
-            if recipient.startswith("+"):
+            if _E164_RE.match(recipient):
                 await client.react_to_message(author, timestamp, emoji, remove=remove, recipient=recipient)
             else:
                 await client.react_to_message(author, timestamp, emoji, remove=remove, group_id=recipient)
@@ -339,7 +339,7 @@ def delete(recipient: str, timestamp: int):
     async def _run():
         async with SignalClient() as client:
             await client.ensure_daemon()
-            if recipient.startswith("+"):
+            if _E164_RE.match(recipient):
                 await client.delete_message(recipient, timestamp)
             else:
                 await client.delete_group_message(recipient, timestamp)
@@ -614,7 +614,7 @@ def pin(target: str, timestamp: int, author: str):
     async def _run():
         async with SignalClient() as client:
             await client.ensure_daemon()
-            is_group = not target.startswith("+")
+            is_group = not _E164_RE.match(target)
             await client.pin_message(
                 author, timestamp,
                 group_id=target if is_group else None,
@@ -637,7 +637,7 @@ def unpin(target: str, timestamp: int, author: str):
     async def _run():
         async with SignalClient() as client:
             await client.ensure_daemon()
-            is_group = not target.startswith("+")
+            is_group = not _E164_RE.match(target)
             await client.unpin_message(
                 author, timestamp,
                 group_id=target if is_group else None,

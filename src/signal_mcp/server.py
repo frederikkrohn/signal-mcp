@@ -173,6 +173,21 @@ TOOLS = [
         },
     ),
     Tool(
+        name="receive_direct",
+        description=(
+            "Receive messages by calling signal-cli directly, bypassing the daemon. "
+            "Use this as a fallback when the daemon is stuck or unresponsive — it stops the daemon, "
+            "calls signal-cli receive directly, then lets the daemon restart. "
+            "Prefer receive_messages (daemon mode) for normal use; use this only for troubleshooting."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "timeout": {"type": "integer", "description": "Seconds to wait for messages (default: 5)", "default": 5},
+            },
+        },
+    ),
+    Tool(
         name="list_contacts",
         description=(
             "List all Signal contacts known to this account, including names and phone numbers. "
@@ -1562,10 +1577,10 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
             return _ok({"status": "sent", "timestamp": result.timestamp})
 
         elif name == "list_attachments":
-            return _ok(client.list_attachments())
+            return _ok(await asyncio.to_thread(client.list_attachments))
 
         elif name == "get_attachment":
-            return _ok(client.get_attachment(arguments["filename"]))
+            return _ok(await asyncio.to_thread(client.get_attachment, arguments["filename"]))
 
         elif name == "receive_messages":
             await client._ensure_caches()
@@ -1586,6 +1601,15 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
                         "messages": [client._enrich_message(m) for m in msgs],
                     })
                 raise
+
+        elif name == "receive_direct":
+            await client._ensure_caches()
+            try:
+                timeout = int(arguments.get("timeout", 5))
+            except (TypeError, ValueError):
+                return _err("timeout must be an integer number of seconds")
+            messages = await client.receive_direct(timeout=timeout)
+            return _ok([client._enrich_message(m) for m in messages])
 
         elif name == "list_contacts":
             contacts = await client.list_contacts(search=arguments.get("search"))
@@ -1731,7 +1755,10 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
             # Fetch one extra to detect whether more exist without a COUNT query
             messages = await client.get_unread_messages(limit=limit + 1)
             has_more = len(messages) > limit
-            messages = messages[:limit]
+            # messages are chronological (oldest first); the extra probe row, if
+            # present, is the oldest of the batch — drop from the front, not the back,
+            # so the newest unread message is never discarded.
+            messages = messages[-limit:] if limit else []
             # Mark as read — Claude has now seen these messages
             unread_ids = [m.id for m in messages]
             if unread_ids:

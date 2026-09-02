@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,9 @@ from .config import (
 )
 from .models import Attachment, Contact, Group, GroupMember, Message, SendResult
 from . import store as _store
+
+
+logger = logging.getLogger(__name__)
 
 
 class SignalError(Exception):
@@ -144,15 +148,20 @@ class SignalClient:
 
     # ── Daemon management ─────────────────────────────────────────────────────
 
-    async def ensure_daemon(self) -> None:
-        """Start signal-cli daemon if not already running (single-flight)."""
+    async def ensure_daemon(self, force: bool = False) -> None:
+        """Start signal-cli daemon if not already running (single-flight).
+
+        force: skip the TTL fast path. Callers recovering from a just-observed
+        connection failure must pass this — otherwise a daemon that was healthy
+        moments ago but has since crashed won't be restarted until the TTL expires.
+        """
         # A background watcher owns message ingestion and may deliberately use
         # another source (for example Signal Desktop) or an externally managed
         # signal-cli daemon.  Never start a competing daemon in that case.
         if is_service_installed() or RECEIVE_LOCK_FILE.exists():
             return
         # TTL fast path: skip HTTP ping if daemon was healthy recently
-        if time.monotonic() - _daemon_last_ok_at < _DAEMON_OK_TTL:
+        if not force and time.monotonic() - _daemon_last_ok_at < _DAEMON_OK_TTL:
             return
         if await self._daemon_alive():
             return
@@ -285,8 +294,12 @@ class SignalClient:
                     break
                 except httpx.ConnectError:
                     if attempt == 0:
-                        # Daemon may have crashed — try to restart before the second attempt
-                        await self.ensure_daemon()
+                        # Daemon may have crashed — try to restart before the second attempt.
+                        # force=True: we just observed a live connection failure, so the
+                        # TTL fast path (which assumes recent health) must not short-circuit this.
+                        await self.ensure_daemon(force=True)
+                except httpx.HTTPStatusError as e:
+                    raise SignalError(f"signal-cli error: {_enhance_error(str(e))}") from e
             else:
                 raise SignalError("signal-cli daemon not running. Run: signal-mcp daemon")
 
@@ -661,8 +674,12 @@ class SignalClient:
                 try:
                     shutil.copy2(local_path, dest)
                     local_path = str(dest)
-                except Exception:
-                    pass
+                except OSError:
+                    logger.warning(
+                        "Failed to copy attachment %r into %s; local_path will still "
+                        "point at the signal-cli-managed source, which may be ephemeral",
+                        local_path, dest,
+                    )
             attachments.append(Attachment(
                 content_type=att.get("contentType", "application/octet-stream"),
                 filename=att.get("filename", ""),
@@ -965,7 +982,7 @@ class SignalClient:
 
     async def get_user_status(self, recipients: list[str]) -> list[dict]:
         """Check whether phone numbers are registered Signal users."""
-        result = await self._rpc("getUserStatus", {"recipients": recipients})
+        result = await self._rpc("getUserStatus", {"recipient": recipients})
         return result if isinstance(result, list) else []
 
     async def send_sync_request(self) -> None:
@@ -1214,8 +1231,10 @@ class SignalClient:
 
         Returns the base64-encoded image string, or empty string if none.
         """
-        # signal-cli distinguishes contact avatars vs group avatars by param name
-        if identifier.startswith("+"):
+        # signal-cli distinguishes contact avatars vs group avatars by param name.
+        # Base64 group IDs can themselves start with "+", so match a full E.164
+        # phone number rather than just checking the leading character.
+        if _E164_RE.match(identifier):
             result = await self._rpc("getAvatar", {"recipient": identifier})
         else:
             result = await self._rpc("getAvatar", {"groupId": identifier})
