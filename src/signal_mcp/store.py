@@ -256,10 +256,15 @@ def update_message_body(target_timestamp_ms: int, new_body: str, sender: str | N
                 (target_timestamp_ms, sender),
             ).fetchone()
         else:
-            row = conn.execute(
-                "SELECT rowid, id, sender, body FROM messages WHERE timestamp = ? LIMIT 1",
+            # No sender to disambiguate: only proceed if exactly one message shares
+            # this millisecond timestamp. Two candidates means we can't tell which
+            # one the edit applies to — updating an arbitrary row could silently
+            # overwrite an unrelated message, so skip rather than guess.
+            rows = conn.execute(
+                "SELECT rowid, id, sender, body FROM messages WHERE timestamp = ? LIMIT 2",
                 (target_timestamp_ms,),
-            ).fetchone()
+            ).fetchall()
+            row = rows[0] if len(rows) == 1 else None
         if not row:
             return
         conn.execute("UPDATE messages SET body = ? WHERE id = ?", (new_body, row["id"]))

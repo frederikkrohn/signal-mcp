@@ -25,11 +25,13 @@ def test_decode_group_id_none():
 
 
 def test_decode_group_id_too_long():
-    assert _decode_group_id("x" * 101) is None
+    # Long group IDs are valid and must not be silently dropped.
+    assert _decode_group_id("x" * 101) == "x" * 101
 
 
 def test_decode_group_id_blob_prefix():
-    assert _decode_group_id("blob:something") is None
+    # The "blob:" prefix is stripped, not treated as making the id invalid.
+    assert _decode_group_id("blob:something") == "something"
 
 
 def test_decode_group_id_valid():
@@ -101,12 +103,13 @@ def test_read_messages_preserves_read_status(tmp_path):
     db = _make_plain_db(tmp_path)
     messages = _read_messages_from_plain_db(db)
     by_id = {m.id: m for m in messages}
+    # ids are the message timestamp (matches the live-message id scheme)
     # m1: readStatus=1 → unread
-    assert by_id["desktop_m1"].is_read is False
+    assert by_id["1717243200000"].is_read is False
     # m2: readStatus=0 → read
-    assert by_id["desktop_m2"].is_read is True
+    assert by_id["1717243300000"].is_read is True
     # m3: readStatus=NULL → default to read
-    assert by_id["desktop_m3"].is_read is True
+    assert by_id["1717243400000"].is_read is True
 
 
 def test_read_messages_without_readstatus_column(tmp_path):

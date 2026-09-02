@@ -264,7 +264,7 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
             source_col = "NULL AS sourceUuid"
 
         # readStatus column present in Signal Desktop schema v39+
-        # (renamed from "unread"). 1=read, 0=unread, NULL=unknown.
+        # (renamed from "unread"). 0=read, 1=unread, NULL=unknown.
         if "readStatus" in msg_cols:
             read_col = "m.readStatus"
         else:
@@ -298,20 +298,29 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
             if not ts_ms:
                 continue
 
-            # Outgoing: source is NULL in Signal Desktop — use own account number
+            # Outgoing: source is NULL in Signal Desktop — use own account number,
+            # and record the DM contact as recipient so get_conversation()/
+            # list_conversations() (which match on sender OR recipient) can find it.
+            recipient = None
             if row["type"] == "outgoing":
                 sender = own_number or "me"
+                if not row["conv_group_id"]:
+                    recipient = row["conv_e164"] or None
             else:
                 sender = row["source"] or row["sourceUuid"] or row["conv_e164"] or ""
 
-            # Signal Desktop: readStatus=0 means read, 1=unread, NULL=unknown
+            # Signal Desktop: readStatus=0 means read, 1=unread, NULL=unknown.
             # Default unknown/old messages to read (safer than false unread counts)
             read_status = row["readStatus"]
             is_read = read_status == 0 if read_status is not None else True
 
             messages.append(Message(
-                id=f"desktop_{row['id']}",
+                # Same id scheme as live-received messages (str(ts_ms)) so INSERT OR
+                # IGNORE in store.save_message() actually dedups a message that was
+                # captured live and later re-seen via desktop import/sync.
+                id=str(ts_ms),
                 sender=sender,
+                recipient=recipient,
                 body=row["body"] or "",
                 timestamp=datetime.fromtimestamp(ts_ms / 1000),
                 group_id=_decode_group_id(row["conv_group_id"]),
@@ -371,10 +380,11 @@ def _decode_group_id(raw: str | None) -> str | None:
     """Signal Desktop stores group IDs as base64; convert to the format signal-cli uses."""
     if not raw:
         return None
-    # Strip any Blob prefix Signal Desktop adds
-    if raw.startswith("blob:") or len(raw) > 100:
-        return None
-    return raw
+    # Strip any Blob prefix Signal Desktop adds — the id itself is still valid,
+    # so keep it rather than discarding the whole value.
+    if raw.startswith("blob:"):
+        raw = raw[len("blob:"):]
+    return raw or None
 
 
 def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_ms: int = 0) -> dict:

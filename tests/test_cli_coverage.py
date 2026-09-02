@@ -193,7 +193,7 @@ def test_delete_signal_error(runner):
     client = _mock_client()
     client.delete_message = AsyncMock(side_effect=SignalError("fail"))
     with patch("signal_mcp.cli.SignalClient", return_value=client):
-        result = runner.invoke(cli, ["delete", "+1999", "12345"])
+        result = runner.invoke(cli, ["delete", "+12025551999", "12345"])
     assert result.exit_code == 1
     assert "Error:" in result.output
 

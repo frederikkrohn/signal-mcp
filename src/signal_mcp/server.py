@@ -1577,10 +1577,10 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
             return _ok({"status": "sent", "timestamp": result.timestamp})
 
         elif name == "list_attachments":
-            return _ok(client.list_attachments())
+            return _ok(await asyncio.to_thread(client.list_attachments))
 
         elif name == "get_attachment":
-            return _ok(client.get_attachment(arguments["filename"]))
+            return _ok(await asyncio.to_thread(client.get_attachment, arguments["filename"]))
 
         elif name == "receive_messages":
             await client._ensure_caches()
@@ -1755,7 +1755,10 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
             # Fetch one extra to detect whether more exist without a COUNT query
             messages = await client.get_unread_messages(limit=limit + 1)
             has_more = len(messages) > limit
-            messages = messages[:limit]
+            # messages are chronological (oldest first); the extra probe row, if
+            # present, is the oldest of the batch — drop from the front, not the back,
+            # so the newest unread message is never discarded.
+            messages = messages[-limit:] if limit else []
             # Mark as read — Claude has now seen these messages
             unread_ids = [m.id for m in messages]
             if unread_ids:
