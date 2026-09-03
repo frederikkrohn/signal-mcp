@@ -11,7 +11,7 @@
 # After linking, start the MCP server:
 #   docker compose up -d
 
-FROM eclipse-temurin:21-jre-bookworm AS base
+FROM eclipse-temurin:21-jre-noble AS base
 
 # ── system deps ────────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
