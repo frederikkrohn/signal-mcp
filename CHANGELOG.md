@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.35.1] — 2026-09-03
+
+### Changed
+
+- **10 tools now document a primary-device-only requirement**: `block_contact`, `unblock_contact`, `add_device`, `remove_device`, `update_device`, `update_configuration`, `set_pin`, `remove_pin`, `start_change_number`, `finish_change_number`. Each maps to a signal-cli command that throws `NotPrimaryDeviceException` when signal-mcp runs as a linked device (the setup this repo's own docs recommend) — confirmed by reading signal-cli's command source. The tools are unchanged and work correctly when signal-mcp is the account's primary device; the description now says so upfront instead of only surfacing it as a runtime error.
+
+---
+
 ## [1.35.0] — 2026-09-03
 
 ### Removed
