@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.33.1] — 2026-09-03
+
+### Fixed
+
+- **Docker build failure on Glama** — base image `eclipse-temurin:21-jre-bookworm` ships Python 3.11, but `pyproject.toml` requires `>=3.12`, so `pip install -e .` failed. Switched to the `-noble` tag (Ubuntu 24.04), which ships Python 3.12 by default.
+
+---
+
 ## [1.8.0] — 2026-05-03
 
 ### UX
