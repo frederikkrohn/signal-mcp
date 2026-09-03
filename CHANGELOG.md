@@ -2,6 +2,18 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.33.2] — 2026-09-03
+
+### Fixed
+
+- **Self-conversation ("note to self") queries matched every outgoing message** — `get_conversation`, `count_conversation`, `delete_conversation_messages`, and `get_messages_for_export` all bound the own-account number to both `sender` and `recipient` with `OR`, so fetching or deleting the notes-to-self thread returned/deleted every outgoing message to anyone.
+- **`list_conversations` showed raw numbers/IDs instead of names** — contact/group caches were never warmed before name resolution.
+- **`clear_local_store` confirm gate bypassable** — truthiness check let a non-boolean truthy value (e.g. the string `"false"`) through; now requires `confirm is True`.
+- **`get_conversation` pagination crash on string offset** — `limit`/`offset` weren't cast to `int`, so a numeric-string offset raised `TypeError`.
+- **Scheduled-message sends blocked the event loop** — synchronous SQLite calls in `process_scheduled_messages` now run via `asyncio.to_thread`.
+
+---
+
 ## [1.33.1] — 2026-09-03
 
 ### Fixed
