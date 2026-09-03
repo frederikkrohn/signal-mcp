@@ -375,6 +375,8 @@ TOOLS = [
         name="block_contact",
         description=(
             "Block a Signal contact so they can no longer send you messages or call you. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "The block is applied locally via signal-cli and propagated to the Signal network. "
             "The blocked contact receives NO notification — from their perspective, messages appear sent "
             "but are silently discarded before reaching you; delivery receipts are suppressed. "
@@ -397,6 +399,8 @@ TOOLS = [
         name="unblock_contact",
         description=(
             "Unblock a previously blocked Signal contact, restoring their ability to send you messages and calls. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "The contact is NOT notified that they were unblocked. "
             "Use block_contact to re-block, or list_contacts to see which contacts are blocked."
         ),
@@ -499,6 +503,8 @@ TOOLS = [
         name="add_device",
         description=(
             "Link a new secondary device to your Signal account using a device-link URI. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "The URI is generated on the new device by running 'signal-cli link' or by scanning the QR code "
             "in Signal Desktop's Settings → Linked Devices → Link New Device. "
             "After linking, the new device receives future messages but not historical ones. "
@@ -518,6 +524,8 @@ TOOLS = [
         name="remove_device",
         description=(
             "Permanently unlink a secondary device from your Signal account. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "The device loses access to send and receive messages immediately. "
             "device_id must be a secondary device (ID ≥ 2) — you cannot unlink your primary device. "
             "The removed device is not notified; it simply stops receiving messages. "
@@ -830,6 +838,8 @@ TOOLS = [
         name="update_device",
         description=(
             "Rename a linked secondary device on your Signal account. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "The updated name is synced to the Signal network and appears immediately in your Signal app's "
             "Settings → Linked Devices list across all your devices. "
             "Only secondary (linked) devices can be renamed; the primary device name is set during registration. "
@@ -1083,6 +1093,8 @@ TOOLS += [
         name="update_configuration",
         description=(
             "Update Signal account-wide messaging settings. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "read_receipts controls whether Signal tells senders when you have read their messages. "
             "typing_indicators controls whether contacts see the '...' indicator when you are composing. "
             "link_previews controls whether URLs in outgoing messages generate inline previews. "
@@ -1279,6 +1291,8 @@ TOOLS += [
         name="set_pin",
         description=(
             "Set a Signal Registration Lock PIN to protect your account against SIM-swap and unauthorized re-registration. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "Once set, anyone attempting to re-register your phone number on Signal must provide this PIN. "
             "The PIN must be 4–20 digits. Signal also uses the PIN to derive your storage encryption key. "
             "If you forget the PIN, you must wait 7 days for the lock to expire before re-registering. "
@@ -1298,6 +1312,8 @@ TOOLS += [
         name="remove_pin",
         description=(
             "Remove the Signal Registration Lock PIN, disabling re-registration protection on this account. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "After removal, anyone who controls your phone number can re-register Signal without a PIN. "
             "Use only if you intentionally want to disable the registration lock. "
             "Use set_pin to set a new PIN instead of removing the existing one. "
@@ -1309,6 +1325,8 @@ TOOLS += [
         name="start_change_number",
         description=(
             "Begin migrating your Signal account to a new phone number. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "Signal sends a 6-digit verification code to the new number via SMS (or voice call if voice=true). "
             "After calling this tool, call finish_change_number with the new number and received code to complete the migration. "
             "If Signal rejects the request due to rate limits, provide a captcha token obtained from "
@@ -1331,6 +1349,8 @@ TOOLS += [
         name="finish_change_number",
         description=(
             "Complete the second step of a Signal phone number change by submitting the verification code. "
+            "Only works when signal-mcp is the account's primary device — fails with "
+            "'This command doesn't work on linked devices' if signal-mcp was set up via signal-cli link. "
             "Must be called after start_change_number, which initiates the number change and triggers the SMS/voice code. "
             "number is the new E.164 phone number you are migrating to. "
             "verification_code is the 6-digit code received via SMS or voice call to that number. "
