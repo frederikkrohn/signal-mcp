@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import datetime
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     CallToolRequestParams,
@@ -1464,11 +1464,11 @@ TOOLS += [
 ]
 
 
-async def _list_tools(params: RequestParams) -> ListToolsResult:
+async def _list_tools(ctx: ServerRequestContext, params: RequestParams) -> ListToolsResult:
     return ListToolsResult(tools=TOOLS)
 
 
-async def call_tool(params: CallToolRequestParams) -> CallToolResult:
+async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
     name = params.name
     arguments = params.arguments or {}
     client = get_client()  # noqa: F841 — used throughout the giant match below

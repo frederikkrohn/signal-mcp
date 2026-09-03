@@ -61,7 +61,7 @@ async def test_list_tools_handler_returns_tools():
     """list_tools() registered handler returns the TOOLS list."""
     from signal_mcp.server import _list_tools as list_tools
     from mcp.types import RequestParams
-    result = await list_tools(RequestParams())
+    result = await list_tools(None, RequestParams())
     assert result.tools == TOOLS
     assert len(result.tools) > 0
 
