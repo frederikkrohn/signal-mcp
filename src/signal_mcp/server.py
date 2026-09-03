@@ -17,9 +17,9 @@ from mcp.types import (
 
 from .client import SignalClient, SignalError
 from .config import check_signal_cli_version, is_service_installed
-from . import store as _store
+from . import __version__, store as _store
 
-app = Server("signal-mcp")
+app = Server("signal-mcp", version=__version__)
 
 _client: SignalClient | None = None
 
