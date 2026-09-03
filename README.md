@@ -204,7 +204,6 @@ signal-mcp install-service   # starts on login, works on macOS and Linux
 
 | Tool | Description |
 |---|---|
-| `get_configuration` | Read current account settings (read receipts, typing indicators, link previews). |
 | `update_configuration` | Toggle read receipts, typing indicators, link previews, or sealed sender indicators. |
 
 ### Sticker Packs
@@ -212,7 +211,7 @@ signal-mcp install-service   # starts on login, works on macOS and Linux
 | Tool | Description |
 |---|---|
 | `list_sticker_packs` | List all installed sticker packs with `pack_id` and sticker IDs for `send_sticker`. |
-| `add_sticker_pack` | Install a sticker pack from a `signal.art` URL. |
+| `add_sticker_pack` | Install a sticker pack from a `signal.art` URL. Returns the pack ID for use with `get_sticker`/`send_sticker`. |
 | `get_sticker` | Retrieve a single sticker image as base64. |
 | `upload_sticker_pack` | Upload and publish a sticker pack from a local manifest.json or zip. Returns the signal.art URL. |
 
@@ -411,7 +410,7 @@ The daemon starts automatically on first use. Attachments are saved to `~/Downlo
 
 signal-mcp wraps the [signal-cli JSON-RPC daemon](https://github.com/AsamK/signal-cli/blob/master/man/signal-cli.1.adoc). Here's what is and isn't covered:
 
-### Covered (72 tools)
+### Covered (71 tools)
 
 | signal-cli command | signal-mcp tool |
 |---|---|
@@ -445,7 +444,7 @@ signal-mcp wraps the [signal-cli JSON-RPC daemon](https://github.com/AsamK/signa
 | `remoteDelete` | `delete_message`, `delete_group_message` |
 | `editMessage` | `edit_message` |
 | `updateProfile` | `update_profile` |
-| `updateConfiguration` | `update_configuration`, `get_configuration` |
+| `updateConfiguration` | `update_configuration` |
 | `addStickerPack` | `add_sticker_pack` |
 | `getSticker` | `get_sticker` |
 | `uploadStickerPack` | `upload_sticker_pack` |

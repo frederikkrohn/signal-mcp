@@ -838,17 +838,6 @@ def test_check_signal_cli_version_not_found(monkeypatch):
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_get_configuration(client):
-    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({
-        "readReceipts": True, "typingIndicators": True, "linkPreviews": False,
-    })))
-    result = await client.get_configuration()
-    assert result["readReceipts"] is True
-    assert result["linkPreviews"] is False
-
-
-@respx.mock
-@pytest.mark.asyncio
 async def test_update_configuration(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
     await client.update_configuration(read_receipts=False, typing_indicators=True)

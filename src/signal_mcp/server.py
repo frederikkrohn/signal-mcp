@@ -36,7 +36,7 @@ _DAEMON_FREE = {
 # Tools NOT in _DAEMON_FREE call ensure_daemon() automatically before executing.
 # get_unread calls _freshen_store() (which may call receive_messages) if no
 # background service is running.
-# list_accounts, list_conversations, get_configuration etc. call signal-cli JSON-RPC.
+# list_accounts, list_conversations, update_configuration etc. call signal-cli JSON-RPC.
 
 
 def get_client() -> SignalClient:
@@ -549,8 +549,9 @@ TOOLS = [
             "Get new unread messages. If the background service (signal-mcp install-service) is running, "
             "reads directly from the local store. Otherwise polls signal-cli first to fetch any messages "
             "that arrived since the last check, then returns unread. Always use this to check for new messages. "
-            "Messages are marked as read after retrieval. Response includes has_more=true if more unread messages "
-            "exist beyond the limit — call again with a higher limit or paginate."
+            "Messages are marked as read after retrieval, so a call with has_more=true in the response "
+            "should be followed by calling get_unread again with the same limit — the just-returned "
+            "messages are no longer unread, so the next call naturally returns the next batch."
         ),
         inputSchema={
             "type": "object",
@@ -1079,11 +1080,6 @@ TOOLS += [
         },
     ),
     Tool(
-        name="get_configuration",
-        description="Get current Signal account configuration (read receipts, typing indicators, link previews)",
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
         name="update_configuration",
         description=(
             "Update Signal account-wide messaging settings. "
@@ -1093,7 +1089,7 @@ TOOLS += [
             "unidentified_delivery_indicators controls whether sealed-sender delivery icons are shown. "
             "All parameters are optional — omit any setting you do not want to change. "
             "Changes take effect immediately and persist across sessions. "
-            "Use get_configuration to read the current values before modifying. "
+            "signal-cli has no way to read back current values — track what you've set yourself if needed. "
             "Use update_account for account-level privacy settings (discoverability, username). "
             "Do NOT use to change your profile name or photo — use update_profile for that."
         ),
@@ -1120,8 +1116,9 @@ TOOLS += [
         name="add_sticker_pack",
         description=(
             "Install a Signal sticker pack from a signal.art URL. "
-            "Once installed, use list_sticker_packs to browse pack contents, then send_sticker or "
-            "send_group_sticker to send individual stickers. "
+            "Returns {status, pack_id} — pack_id is parsed from the URI, ready to pass directly to "
+            "get_sticker or send_sticker/send_group_sticker without a separate list_sticker_packs call. "
+            "Use list_sticker_packs instead if you need to browse the pack's sticker_id/emoji contents first. "
             "The URI must be a signal.art URL in the format: https://signal.art/addstickers/#pack_id=...&pack_key=..."
         ),
         inputSchema={
@@ -1264,7 +1261,7 @@ TOOLS += [
             "discoverable_by_number controls whether others can find you by phone number. "
             "number_sharing controls whether your number is shared with contacts you message. "
             "username sets a @username alias; delete_username removes it. "
-            "Use get_configuration for messaging settings (read receipts, typing indicators)."
+            "Use update_configuration for messaging settings (read receipts, typing indicators)."
         ),
         inputSchema={
             "type": "object",
@@ -1470,7 +1467,10 @@ TOOLS += [
         description=(
             "Process and send any scheduled messages that are currently due. "
             "The background service calls this automatically, but you can also call it manually "
-            "to deliver messages immediately without waiting for the next service run."
+            "to deliver messages immediately without waiting for the next service run. "
+            "Safe to call anytime, including when nothing is due (returns processed=0). "
+            "Returns {processed: count, results: [{id, status: 'sent'|'failed', timestamp or error}, ...]} "
+            "— one entry per job that was due, from list_scheduled_messages' job IDs."
         ),
         inputSchema={"type": "object", "properties": {}},
     ),
@@ -1910,9 +1910,6 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             )
             return _ok({"status": "trusted", "number": arguments["number"]})
 
-        elif name == "get_configuration":
-            return _ok(await client.get_configuration())
-
         elif name == "update_configuration":
             await client.update_configuration(
                 read_receipts=arguments.get("read_receipts"),
@@ -1926,8 +1923,8 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             return _ok(await client.list_sticker_packs())
 
         elif name == "add_sticker_pack":
-            await client.add_sticker_pack(arguments["uri"])
-            return _ok({"status": "installed"})
+            install_result = await client.add_sticker_pack(arguments["uri"])
+            return _ok({"status": "installed", **install_result})
 
         elif name == "get_sticker":
             data = await client.get_sticker(arguments["pack_id"], int(arguments["sticker_id"]))

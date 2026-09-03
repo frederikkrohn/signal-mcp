@@ -11,6 +11,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -1028,11 +1029,6 @@ class SignalClient:
 
     # ── Configuration ─────────────────────────────────────────────────────────
 
-    async def get_configuration(self) -> dict:
-        """Return current Signal account configuration flags."""
-        result = await self._rpc("getConfiguration")
-        return result if isinstance(result, dict) else {}
-
     async def update_configuration(
         self,
         read_receipts: bool | None = None,
@@ -1060,9 +1056,16 @@ class SignalClient:
         result = await self._rpc("listStickerPacks")
         return result if isinstance(result, list) else []
 
-    async def add_sticker_pack(self, uri: str) -> None:
-        """Install a sticker pack from a signal.art URL."""
+    async def add_sticker_pack(self, uri: str) -> dict:
+        """Install a sticker pack from a signal.art URL.
+
+        Returns {"pack_id": ...} parsed from the URI, so callers don't need a
+        separate list_sticker_packs round-trip just to learn the ID they need
+        for get_sticker/send_sticker.
+        """
         await self._rpc("addStickerPack", {"uri": uri})
+        pack_id = parse_qs(urlsplit(uri).fragment).get("pack_id", [None])[0]
+        return {"pack_id": pack_id}
 
     async def get_sticker(self, pack_id: str, sticker_id: int) -> str:
         """Get a single sticker image as a base64-encoded string."""

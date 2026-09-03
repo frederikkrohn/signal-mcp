@@ -600,17 +600,6 @@ async def test_missing_multiple_required_params():
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_tool_get_configuration():
-    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({
-        "readReceipts": True, "typingIndicators": False,
-    })))
-    result = await call_tool("get_configuration", {})
-    data = json.loads(result[0].text)
-    assert data["readReceipts"] is True
-
-
-@respx.mock
-@pytest.mark.asyncio
 async def test_tool_update_configuration():
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
     result = await call_tool("update_configuration", {"read_receipts": False})
