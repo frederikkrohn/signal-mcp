@@ -2,6 +2,15 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.34.0] — 2026-09-03
+
+### Added
+
+- **`send_note_to_self` now supports rich text, attachments, and threading.** Message text supports lightweight markdown — `**bold**`, `~~strikethrough~~`, `` `monospace` `` — parsed into Signal's native `textStyle` ranges (real rendered rich text, not emoji tricks). New `attachments` param sends files (e.g. a package QR code) alongside a styled caption in one call. New `quote_author`/`quote_timestamp` params thread a follow-up note under a previous one (e.g. package status updates staying grouped together).
+- **New `signal_mcp.formatting` module** — `parse_styled_text()`, a small pure function converting markdown markers to UTF-16-offset style ranges, fully unit-tested including emoji/surrogate-pair edge cases.
+
+---
+
 ## [1.33.3] — 2026-09-03
 
 ### Fixed
