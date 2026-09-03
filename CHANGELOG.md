@@ -2,6 +2,15 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.34.1] — 2026-09-03
+
+### Fixed
+
+- **`__version__` was hardcoded and never bumped** — stuck at `1.33.0` across four releases, so `signal-mcp --version`/`status` lied about what was actually running. Now sourced from installed package metadata (`importlib.metadata.version`), never hand-maintained again.
+- **MCP handshake reported an empty version string** — `Server("signal-mcp")` never passed a `version` kwarg. Now passes `version=__version__`.
+
+---
+
 ## [1.34.0] — 2026-09-03
 
 ### Added
