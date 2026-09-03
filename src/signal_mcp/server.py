@@ -124,12 +124,25 @@ TOOLS = [
         description=(
             "Send a note to yourself via Signal's 'Note to Self' / saved messages feature. "
             "The note is synced across all your linked Signal devices. "
-            "Useful for saving reminders, bookmarks, or drafts that sync to your phone."
+            "Useful for saving reminders, bookmarks, or drafts that sync to your phone. "
+            "message supports lightweight markdown for Signal's native rich text: "
+            "**bold**, ~~strikethrough~~, `monospace` — use it to visually distinguish "
+            "different kinds of notes (e.g. a bold title per note) instead of plain text blobs. "
+            "Pass attachments (e.g. a QR code image) and quote_author/quote_timestamp "
+            "(to thread a follow-up under a previous note, from a prior send_note_to_self result) "
+            "to combine content in one message instead of separate calls."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "message": {"type": "string", "description": "Note text to save"},
+                "message": {"type": "string", "description": "Note text to save. Supports **bold**, ~~strikethrough~~, `monospace`"},
+                "attachments": {
+                    "type": "array",
+                    "description": "File paths to attach (e.g. a QR code or screenshot)",
+                    "items": {"type": "string"},
+                },
+                "quote_author": {"type": "string", "description": "Your own account number, to thread this note under a previous one"},
+                "quote_timestamp": {"type": "integer", "description": "Timestamp of the note being followed up on (from a prior send_note_to_self result)"},
             },
             "required": ["message"],
         },
@@ -1552,7 +1565,12 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             return _ok({"status": "sent", "timestamp": result.timestamp, "group_id": result.recipient})
 
         elif name == "send_note_to_self":
-            result = await client.send_note_to_self(arguments["message"])
+            result = await client.send_note_to_self(
+                arguments["message"],
+                attachments=arguments.get("attachments"),
+                quote_author=arguments.get("quote_author"),
+                quote_timestamp=arguments.get("quote_timestamp"),
+            )
             return _ok({"status": "sent", "timestamp": result.timestamp})
 
         elif name == "edit_message":

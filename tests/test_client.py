@@ -522,6 +522,27 @@ async def test_send_note_to_self(client):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_send_note_to_self_styled_text_and_attachment(client, tmp_path):
+    route = respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({"timestamp": 100})))
+    qr = tmp_path / "qr.png"
+    qr.write_bytes(b"fake-png")
+    await client.send_note_to_self(
+        "**Package**: track `ABC123`",
+        attachments=[str(qr)],
+        quote_author="+10000000000",
+        quote_timestamp=1700000000000,
+    )
+    import json
+    params = json.loads(route.calls[0].request.read())["params"]
+    assert params["message"] == "Package: track ABC123"
+    assert params["textStyle"] == ["0:7:BOLD", "15:6:MONOSPACE"]
+    assert params["attachment"] == [str(qr.resolve())]
+    assert params["quoteAuthor"] == "+10000000000"
+    assert params["quoteTimestamp"] == 1700000000000
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_receive_delivery_receipt_not_saved_to_store(client):
     envelopes = [
         {

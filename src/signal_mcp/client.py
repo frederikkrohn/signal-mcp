@@ -27,6 +27,7 @@ from .config import (
     read_daemon_pid,
     save_daemon_pid,
 )
+from .formatting import parse_styled_text
 from .models import Attachment, Contact, Group, GroupMember, Message, SendResult
 from . import store as _store
 
@@ -364,9 +365,39 @@ class SignalClient:
         ))
         return SendResult(timestamp=ts, recipient=group_id, success=True)
 
-    async def send_note_to_self(self, message: str) -> SendResult:
-        """Send a note to yourself (saved messages)."""
-        return await self.send_message(self.account, message)
+    async def send_note_to_self(
+        self,
+        message: str,
+        attachments: list[str] | None = None,
+        quote_author: str | None = None,
+        quote_timestamp: int | None = None,
+    ) -> SendResult:
+        """Send a note to yourself (saved messages).
+
+        message supports lightweight markdown for Signal's native rich text:
+        **bold**, ~~strikethrough~~, `monospace`.
+        """
+        await self._rate_limiter.acquire()
+        plain_text, style_ranges = parse_styled_text(message)
+        params: dict = {"recipient": [self.account], "message": plain_text}
+        if style_ranges:
+            params["textStyle"] = style_ranges
+        if attachments:
+            params["attachment"] = [str(Path(p).expanduser().resolve()) for p in attachments]
+        if quote_author and quote_timestamp:
+            params["quoteAuthor"] = quote_author
+            params["quoteTimestamp"] = quote_timestamp
+        result = await self._rpc("send", params)
+        ts = result.get("timestamp", int(time.time() * 1000))
+        await asyncio.to_thread(_store.save_message, Message(
+            id=f"sent_{ts}_{self.account}",
+            sender=self.account,
+            recipient=self.account,
+            body=plain_text,
+            timestamp=datetime.fromtimestamp(ts / 1000),
+            quote_id=str(quote_timestamp) if quote_timestamp else None,
+        ))
+        return SendResult(timestamp=ts, recipient=self.account, success=True)
 
     async def send_attachment(
         self,

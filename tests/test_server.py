@@ -342,6 +342,25 @@ async def test_tool_send_note_to_self():
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_tool_send_note_to_self_styled_with_attachment(tmp_path):
+    route = respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({"timestamp": 1000})))
+    qr = tmp_path / "qr.png"
+    qr.write_bytes(b"fake-png")
+    result = await call_tool("send_note_to_self", {
+        "message": "**Package**",
+        "attachments": [str(qr)],
+        "quote_author": "+10000000000",
+        "quote_timestamp": 1700000000000,
+    })
+    assert "sent" in result[0].text
+    import json
+    params = json.loads(route.calls[0].request.read())["params"]
+    assert params["textStyle"] == ["0:7:BOLD"]
+    assert params["attachment"] == [str(qr.resolve())]
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_tool_edit_message_dm():
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
     result = await call_tool("edit_message", {
