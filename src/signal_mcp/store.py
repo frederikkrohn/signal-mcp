@@ -165,13 +165,30 @@ def save_message(msg: Message) -> bool:
     return True
 
 
+def _conversation_where(recipient: str, own_number: str = "") -> tuple[str, list]:
+    """Build the WHERE clause + params matching messages exchanged with *recipient*.
+
+    A plain "sender = ? OR recipient = ?" (both bound to *recipient*) breaks for the
+    self-conversation ("note to self"): outgoing messages always have sender=own_number,
+    so binding own_number to that OR would match every outgoing message to anyone, not
+    just notes to self. When recipient is our own number, require both sides to match.
+    """
+    if own_number and recipient == own_number:
+        return "group_id IS NULL AND sender = ? AND recipient = ?", [recipient, recipient]
+    return (
+        "group_id = ? OR (group_id IS NULL AND (sender = ? OR recipient = ?))",
+        [recipient, recipient, recipient],
+    )
+
+
 def get_conversation(
-    recipient: str, limit: int = 50, offset: int = 0, since: datetime | None = None
+    recipient: str, limit: int = 50, offset: int = 0, since: datetime | None = None,
+    own_number: str = "",
 ) -> list[Message]:
     """Get message history with a contact (by number) or group (by group_id)."""
     init_db()
     with _db() as conn:
-        params: list = [recipient, recipient, recipient]
+        where, params = _conversation_where(recipient, own_number)
         since_clause = ""
         if since:
             since_clause = "AND timestamp >= ?"
@@ -179,8 +196,7 @@ def get_conversation(
         params.extend([limit, offset])
         rows = conn.execute(
             f"""SELECT * FROM messages
-               WHERE (group_id = ?
-                  OR (group_id IS NULL AND (sender = ? OR recipient = ?)))
+               WHERE ({where})
                {since_clause}
                ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
             params,
@@ -367,20 +383,19 @@ def list_conversations(own_number: str = "") -> list[dict]:
 
 
 def count_conversation(
-    recipient: str, since: datetime | None = None
+    recipient: str, since: datetime | None = None, own_number: str = ""
 ) -> int:
     """Return total message count matching get_conversation's filter — used for has_more."""
     init_db()
     with _db() as conn:
-        params: list = [recipient, recipient, recipient]
+        where, params = _conversation_where(recipient, own_number)
         since_clause = ""
         if since:
             since_clause = "AND timestamp >= ?"
             params.append(int(since.timestamp() * 1000))
         row = conn.execute(
             f"""SELECT COUNT(*) FROM messages
-               WHERE (group_id = ?
-                  OR (group_id IS NULL AND (sender = ? OR recipient = ?)))
+               WHERE ({where})
                {since_clause}""",
             params,
         ).fetchone()
@@ -399,11 +414,11 @@ def clear_store() -> int:
     return count
 
 
-def delete_conversation_messages(recipient: str) -> int:
+def delete_conversation_messages(recipient: str, own_number: str = "") -> int:
     """Delete all locally stored messages for one contact or group. Returns count deleted."""
     init_db()
-    _where = "group_id = ? OR (group_id IS NULL AND (sender = ? OR recipient = ?))"
-    params = (recipient, recipient, recipient)
+    _where, params = _conversation_where(recipient, own_number)
+    params = tuple(params)
     with _db() as conn:
         count = conn.execute(f"SELECT COUNT(*) FROM messages WHERE {_where}", params).fetchone()[0]
         if count == 0:
@@ -420,6 +435,7 @@ def delete_conversation_messages(recipient: str) -> int:
 def get_messages_for_export(
     recipient: str | None = None,
     since: datetime | None = None,
+    own_number: str = "",
 ) -> list[Message]:
     """Return Message objects matching the given filters (used by the client for enriched export)."""
     init_db()
@@ -427,10 +443,9 @@ def get_messages_for_export(
         params: list = []
         clauses: list[str] = []
         if recipient:
-            clauses.append(
-                "(group_id = ? OR (group_id IS NULL AND (sender = ? OR recipient = ?)))"
-            )
-            params.extend([recipient, recipient, recipient])
+            where, where_params = _conversation_where(recipient, own_number)
+            clauses.append(f"({where})")
+            params.extend(where_params)
         if since:
             clauses.append("timestamp >= ?")
             params.append(int(since.timestamp() * 1000))

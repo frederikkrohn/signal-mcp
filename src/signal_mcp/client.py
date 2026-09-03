@@ -926,7 +926,8 @@ class SignalClient:
         self, recipient: str, limit: int = 50, offset: int = 0, since: datetime | None = None
     ) -> list[Message]:
         messages = await asyncio.to_thread(
-            _store.get_conversation, recipient, limit=limit, offset=offset, since=since
+            _store.get_conversation, recipient, limit=limit, offset=offset, since=since,
+            own_number=self.account,
         )
         # Auto-mark received messages as read (like every Signal client does)
         unread_ids = [m.id for m in messages if not m.is_read and m.sender != self.account]
@@ -943,6 +944,7 @@ class SignalClient:
         return await asyncio.to_thread(_store.search_messages, query, limit=limit, offset=offset, sender=sender)
 
     async def list_conversations(self) -> list[dict]:
+        await self._ensure_caches()
         convs = await asyncio.to_thread(_store.list_conversations, own_number=self.account)
         for conv in convs:
             if conv["type"] == "direct":
@@ -957,7 +959,9 @@ class SignalClient:
 
     async def delete_local_messages(self, recipient: str) -> int:
         """Delete locally stored messages for one contact or group. Returns count deleted."""
-        return await asyncio.to_thread(_store.delete_conversation_messages, recipient)
+        return await asyncio.to_thread(
+            _store.delete_conversation_messages, recipient, own_number=self.account
+        )
 
     async def export_messages(
         self,
@@ -967,7 +971,9 @@ class SignalClient:
     ) -> str:
         """Export messages as JSON or CSV text, with sender/group names resolved."""
         await self._ensure_caches()
-        messages = await asyncio.to_thread(_store.get_messages_for_export, recipient, since)
+        messages = await asyncio.to_thread(
+            _store.get_messages_for_export, recipient, since, own_number=self.account
+        )
         enriched = [self._enrich_message(m) for m in messages]
         return await asyncio.to_thread(_store.export_messages, fmt, recipient, since, enriched)
 
@@ -1382,7 +1388,7 @@ class SignalClient:
         from datetime import datetime as _dt
         from . import store as _store
 
-        due = _store.get_pending_scheduled(now=_dt.now())
+        due = await asyncio.to_thread(_store.get_pending_scheduled, now=_dt.now())
         results = []
         for job in due:
             try:
@@ -1391,9 +1397,9 @@ class SignalClient:
                     result = await self.send_group_message(job["group_id"], job["message"])
                 else:
                     result = await self.send_message(job["recipient"], job["message"])
-                _store.mark_scheduled_sent(job["id"])
+                await asyncio.to_thread(_store.mark_scheduled_sent, job["id"])
                 results.append({"id": job["id"], "status": "sent", "timestamp": result.timestamp})
             except Exception as e:
-                _store.mark_scheduled_failed(job["id"], str(e))
+                await asyncio.to_thread(_store.mark_scheduled_failed, job["id"], str(e))
                 results.append({"id": job["id"], "status": "failed", "error": str(e)})
         return results

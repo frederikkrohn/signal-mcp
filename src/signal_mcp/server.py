@@ -1626,15 +1626,16 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
                     since = datetime.fromisoformat(arguments["since"])
                 except ValueError:
                     return _err(f"Invalid since date: {arguments['since']}")
-            limit = arguments.get("limit", 50)
-            offset = arguments.get("offset", 0)
+            limit = int(arguments.get("limit", 50))
+            offset = int(arguments.get("offset", 0))
             await client._ensure_caches()
             messages, total = await asyncio.gather(
                 client.get_conversation(
                     arguments["recipient"], limit=limit, offset=offset, since=since,
                 ),
                 asyncio.to_thread(
-                    _store.count_conversation, arguments["recipient"], since=since
+                    _store.count_conversation, arguments["recipient"], since=since,
+                    own_number=client.account,
                 ),
             )
             # client.get_conversation already marks incoming messages as read
@@ -1942,7 +1943,7 @@ async def call_tool(params: CallToolRequestParams) -> CallToolResult:
             return _ok({"status": "PIN removed"})
 
         elif name == "clear_local_store":
-            if not arguments.get("confirm"):
+            if arguments.get("confirm") is not True:
                 return _err("confirm must be true to delete all local messages")
             count = await client.clear_local_store()
             return _ok({"deleted": count, "status": "cleared"})
