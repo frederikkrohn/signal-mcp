@@ -2,6 +2,20 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.35.0] — 2026-09-03
+
+### Removed
+
+- **`get_configuration`** — called signal-cli's `getConfiguration` RPC, which has never existed in any signal-cli version (confirmed against the pinned v0.14.3 and current master's command registry, and live against a real account: always "Method not implemented"). signal-cli has no way to read configuration back, only set it. `update_configuration`/`update_account`'s descriptions no longer reference the removed tool.
+
+### Fixed
+
+- **`add_sticker_pack`** returned no confirmation of what was installed. Now parses `pack_id` from the URI and returns it, so callers don't need a separate `list_sticker_packs` call for the ID they need next.
+- **`get_unread`**'s description said "call again with a higher limit or paginate," which didn't match actual behavior (no `offset` param exists; returned messages are marked read, so a same-limit re-call naturally advances). Corrected.
+- **`run_scheduled_messages`**'s description never documented its response shape or that it's safe to call when nothing is due. Added both.
+
+---
+
 ## [1.34.1] — 2026-09-03
 
 ### Fixed
