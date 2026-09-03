@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.33.3] — 2026-09-03
+
+### Fixed
+
+- **`tools/list` crashed on the real mcp 2.0 runner** — `_list_tools` and `call_tool` were registered as request handlers but only accepted `params`, not the leading `ctx` argument `RequestHandler = Callable[[ServerRequestContext, ParamsT], Awaitable[Result]]` requires. Every `tools/list` call failed with `TypeError: _list_tools() takes 1 positional argument but 2 were given` (confirmed via Glama's build log, since local tests called the handlers directly with one arg and never caught it).
+
+---
+
 ## [1.33.2] — 2026-09-03
 
 ### Fixed
