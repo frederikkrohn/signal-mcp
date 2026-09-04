@@ -2,6 +2,19 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.36.0] — 2026-09-04
+
+### Fixed
+
+- **`send_group_message`'s `mentions` never worked** — sent a JSON array of `{start,length,author}` objects, but signal-cli's mention parser calls `Pattern.matcher()` on each element expecting a `"start:length:author"` string; an object throws `ClassCastException` on signal-cli's side. Fixed to format mentions into strings. Also documented that `start`/`length` are UTF-16 code units, not codepoints.
+- **`create_poll`/`vote_poll`/`terminate_poll` never worked** — used entirely fictional param names (`poll-question`, `poll-options`, `poll-multi-select`, `targetAuthor`, `targetTimestamp`, `poll-id` — none of these exist in signal-cli). Real keys are `question`/`option`/`no-multi` (multi-select is signal-cli's *default*, disabled via `no-multi`) and `poll-author`/`poll-timestamp` (a poll has no separate ID — it's identified by its message author+timestamp). `vote_poll` was also missing signal-cli's required `vote-count` field; a new local `poll_votes` table now tracks and applies it automatically.
+
+### Removed
+
+- **`poll_id`** parameter from `vote_poll` and `terminate_poll` — it never corresponded to anything in signal-cli's protocol.
+
+---
+
 ## [1.35.1] — 2026-09-03
 
 ### Changed
