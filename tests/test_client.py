@@ -453,7 +453,9 @@ async def test_send_group_message_with_mentions_rpc_params(client):
     await client.send_group_message("grp1==", "hello!", mentions=mentions)
     import json
     params = json.loads(route.calls[0].request.read())["params"]
-    assert params["mention"] == mentions
+    # signal-cli's mention parser only accepts "start:length:author" strings, not objects
+    # (it calls Pattern.matcher() on each element — an object throws ClassCastException).
+    assert params["mention"] == ["0:12:+19999999999"]
 
 
 @respx.mock
@@ -1374,7 +1376,9 @@ async def test_create_poll_group(client):
     result = await client.create_poll("Best day?", ["Mon", "Fri"], group_id="grp==")
     req_body = json.loads(respx.calls[-1].request.content)
     assert req_body["method"] == "sendPollCreate"
-    assert req_body["params"]["poll-question"] == "Best day?"
+    assert req_body["params"]["question"] == "Best day?"
+    assert req_body["params"]["option"] == ["Mon", "Fri"]
+    assert req_body["params"]["no-multi"] is True  # multi_select defaults to False
     assert result.timestamp == 555
 
 
@@ -1382,19 +1386,34 @@ async def test_create_poll_group(client):
 @pytest.mark.asyncio
 async def test_vote_poll(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
-    await client.vote_poll("+1", 123, poll_id=1, votes=[0], group_id="grp==")
+    await client.vote_poll("+1", 123, votes=[0], group_id="grp==")
     req_body = json.loads(respx.calls[-1].request.content)
     assert req_body["method"] == "sendPollVote"
-    assert req_body["params"]["poll-answer"] == [0]
+    assert req_body["params"]["poll-author"] == "+1"
+    assert req_body["params"]["poll-timestamp"] == 123
+    assert req_body["params"]["option"] == [0]
+    assert req_body["params"]["vote-count"] == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_vote_poll_increments_vote_count_on_revote(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
+    await client.vote_poll("+1", 123, votes=[0], group_id="grp==")
+    await client.vote_poll("+1", 123, votes=[1], group_id="grp==")
+    req_body = json.loads(respx.calls[-1].request.content)
+    assert req_body["params"]["vote-count"] == 2
 
 
 @respx.mock
 @pytest.mark.asyncio
 async def test_terminate_poll(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
-    await client.terminate_poll("+1", 123, poll_id=1, group_id="grp==")
+    await client.terminate_poll("+1", 123, group_id="grp==")
     req_body = json.loads(respx.calls[-1].request.content)
     assert req_body["method"] == "sendPollTerminate"
+    assert req_body["params"]["poll-timestamp"] == 123
+    assert "poll-author" not in req_body["params"]
 
 
 @pytest.mark.asyncio

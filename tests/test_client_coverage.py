@@ -584,7 +584,7 @@ async def test_create_poll_multi_select(client):
 
     respx.post(DAEMON_URL).mock(side_effect=capture)
     await client.create_poll("Q?", ["A", "B"], group_id="grp==", multi_select=True)
-    assert captured["body"]["params"].get("poll-multi-select") is True
+    assert "no-multi" not in captured["body"]["params"]  # multi-select is signal-cli's default
 
 
 @respx.mock
@@ -608,7 +608,7 @@ async def test_create_poll_with_recipient(client):
 @pytest.mark.asyncio
 async def test_vote_poll_raises_without_target(client):
     with pytest.raises(SignalError, match="Either"):
-        await client.vote_poll("+1author", 111, 1, [0])
+        await client.vote_poll("+1author", 111, votes=[0])
 
 
 @respx.mock
@@ -622,7 +622,7 @@ async def test_vote_poll_with_recipient(client):
         return httpx.Response(200, json=rpc_ok(None))
 
     respx.post(DAEMON_URL).mock(side_effect=capture)
-    await client.vote_poll("+1author", 111, 1, [0], recipient="+1target")
+    await client.vote_poll("+1author", 111, votes=[0], recipient="+1target")
     assert captured["body"]["params"].get("recipient") == ["+1target"]
 
 
@@ -631,7 +631,7 @@ async def test_vote_poll_with_recipient(client):
 @pytest.mark.asyncio
 async def test_terminate_poll_raises_without_target(client):
     with pytest.raises(SignalError, match="Either"):
-        await client.terminate_poll("+1author", 111, 1)
+        await client.terminate_poll("+1author", 111)
 
 
 @respx.mock
@@ -645,7 +645,7 @@ async def test_terminate_poll_with_recipient(client):
         return httpx.Response(200, json=rpc_ok(None))
 
     respx.post(DAEMON_URL).mock(side_effect=capture)
-    await client.terminate_poll("+1author", 111, 1, recipient="+1target")
+    await client.terminate_poll("+1author", 111, recipient="+1target")
     assert captured["body"]["params"].get("recipient") == ["+1target"]
 
 

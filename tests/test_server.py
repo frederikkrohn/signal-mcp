@@ -399,13 +399,15 @@ async def test_tool_send_message_with_quote():
 @respx.mock
 @pytest.mark.asyncio
 async def test_tool_send_group_message_with_mentions():
-    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({"timestamp": 2})))
+    route = respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({"timestamp": 2})))
     result = await call_tool("send_group_message", {
         "group_id": "grp1==",
         "message": "Hey +19999999999!",
         "mentions": [{"start": 4, "length": 12, "author": "+19999999999"}],
     })
     assert "sent" in result[0].text
+    params = json.loads(route.calls[0].request.read())["params"]
+    assert params["mention"] == ["4:12:+19999999999"]
 
 
 @respx.mock
@@ -1092,7 +1094,7 @@ async def test_tool_vote_poll():
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
     result = await call_tool("vote_poll", {
         "target_author": "+1", "target_timestamp": 123,
-        "poll_id": 1, "votes": [0], "group_id": "grp==",
+        "votes": [0], "group_id": "grp==",
     })
     data = json.loads(result[0].text)
     assert data["status"] == "vote sent"
@@ -1106,7 +1108,7 @@ async def test_tool_terminate_poll():
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
     result = await call_tool("terminate_poll", {
         "target_author": "+1", "target_timestamp": 123,
-        "poll_id": 1, "group_id": "grp==",
+        "group_id": "grp==",
     })
     data = json.loads(result[0].text)
     assert data["status"] == "poll terminated"
@@ -1240,8 +1242,7 @@ async def test_unpin_message_missing_target_returns_error():
 async def test_vote_poll_missing_target_returns_error():
     """vote_poll with neither recipient nor group_id must return an error."""
     result = await call_tool("vote_poll", {
-        "target_author": "+1", "target_timestamp": 123,
-        "poll_id": 1, "votes": [0]
+        "target_author": "+1", "target_timestamp": 123, "votes": [0]
     })
     text = result[0].text
     assert "error" in text.lower() or "required" in text.lower()
@@ -1252,7 +1253,7 @@ async def test_terminate_poll_missing_target_returns_error():
     """terminate_poll with neither recipient nor group_id must return an error."""
     # Include all _REQUIRED fields so the check reaches the recipient/group_id guard
     result = await call_tool("terminate_poll", {
-        "target_author": "+1", "target_timestamp": 123, "poll_id": 1
+        "target_author": "+1", "target_timestamp": 123
     })
     text = result[0].text
     assert "error" in text.lower() or "required" in text.lower()

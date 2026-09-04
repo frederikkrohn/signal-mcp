@@ -91,6 +91,7 @@ TOOLS = [
             "Returns the sent timestamp, which can be used as target_timestamp for react_to_message or edit_message. "
             "To @mention a member, include their name in the message text and pass a mentions list where each entry has "
             "start (character index of the mention in the text), length (character count), and author (E.164 phone number). "
+            "start/length are UTF-16 code units, not Unicode codepoints — an emoji before the mention shifts the offset by 2, not 1. "
             "To reply/quote a message, provide quote_author (sender's phone number) and quote_timestamp (from get_conversation). "
             "Use list_groups to get group_id values. "
             "Use send_group_attachment to send files or images to a group. "
@@ -103,7 +104,7 @@ TOOLS = [
                 "message": {"type": "string", "description": "Message text to send"},
                 "mentions": {
                     "type": "array",
-                    "description": "List of @mentions. Each item: {start: character offset of the mention in the message, length: character count of the mention, author: E.164 phone number of the mentioned member}. Example: message='Hello @Alice', mentions=[{start:6,length:6,author:'+1234567890'}]",
+                    "description": "List of @mentions. Each item: {start: offset of the mention in the message (UTF-16 code units, not codepoints), length: mention length (UTF-16 code units), author: E.164 phone number of the mentioned member}. Example: message='Hello @Alice', mentions=[{start:6,length:6,author:'+1234567890'}]",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -937,7 +938,8 @@ TOOLS = [
             "For single-choice polls, provide exactly one option index in votes. "
             "For multi-select polls, provide all chosen indices in a single call — partial updates are not supported. "
             "votes are 0-based indices corresponding to the options array from the original create_poll call. "
-            "Get target_author, target_timestamp, and poll_id from the poll message returned by get_conversation. "
+            "Get target_author and target_timestamp from the poll message returned by get_conversation — "
+            "a poll has no separate ID, it's identified by its author + message timestamp. "
             "Provide exactly one of recipient (for a DM poll) or group_id (for a group poll). "
             "Voting on a terminated poll returns an error. "
             "Use terminate_poll to close a poll you created and freeze the results. "
@@ -949,12 +951,11 @@ TOOLS = [
             "properties": {
                 "target_author": {"type": "string", "description": "Phone number of the poll creator (E.164)"},
                 "target_timestamp": {"type": "integer", "description": "Timestamp of the poll message (from get_conversation)"},
-                "poll_id": {"type": "integer", "description": "Poll ID from the poll message data"},
                 "votes": {"type": "array", "items": {"type": "integer"}, "description": "Option indices to vote for (0-based). Single item for single-choice polls."},
                 "recipient": {"type": "string", "description": "Phone number for a DM poll — provide this OR group_id"},
                 "group_id": {"type": "string", "description": "Group ID for a group poll — provide this OR recipient"},
             },
-            "required": ["target_author", "target_timestamp", "poll_id", "votes"],
+            "required": ["target_author", "target_timestamp", "votes"],
         },
     ),
     Tool(
@@ -962,7 +963,8 @@ TOOLS = [
         description=(
             "Close (terminate) a poll you created, stopping any further votes. "
             "All participants are notified that the poll has ended and can see the final results. "
-            "Get target_timestamp and poll_id from the original poll message in get_conversation. "
+            "Get target_timestamp from the original poll message in get_conversation — a poll has no "
+            "separate ID, it's identified by its message timestamp. "
             "Only the poll creator can terminate their own poll. "
             "Provide either recipient (DM poll) or group_id (group poll)."
         ),
@@ -971,11 +973,10 @@ TOOLS = [
             "properties": {
                 "target_author": {"type": "string", "description": "Phone number of the poll creator — must be your own number"},
                 "target_timestamp": {"type": "integer", "description": "Timestamp of the poll message (from get_conversation)"},
-                "poll_id": {"type": "integer", "description": "Poll ID from the original poll message data"},
                 "recipient": {"type": "string", "description": "Phone number for a DM poll — provide this OR group_id"},
                 "group_id": {"type": "string", "description": "Group ID for a group poll — provide this OR recipient"},
             },
-            "required": ["target_author", "target_timestamp", "poll_id"],
+            "required": ["target_author", "target_timestamp"],
         },
     ),
     Tool(
@@ -1556,8 +1557,8 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             "get_avatar":                     ["identifier"],
             "send_message_request_response":  ["sender", "accept"],
             "create_poll":                    ["question", "options"],
-            "vote_poll":                      ["target_author", "target_timestamp", "poll_id", "votes"],
-            "terminate_poll":                 ["target_author", "target_timestamp", "poll_id"],
+            "vote_poll":                      ["target_author", "target_timestamp", "votes"],
+            "terminate_poll":                 ["target_author", "target_timestamp"],
             "start_change_number":            ["number"],
             "finish_change_number":           ["number", "verification_code"],
             "submit_rate_limit_challenge":    ["challenge", "captcha"],
@@ -2029,7 +2030,6 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             await client.vote_poll(
                 target_author=arguments["target_author"],
                 target_timestamp=arguments["target_timestamp"],
-                poll_id=arguments["poll_id"],
                 votes=arguments["votes"],
                 recipient=arguments.get("recipient"),
                 group_id=arguments.get("group_id"),
@@ -2042,7 +2042,6 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             await client.terminate_poll(
                 target_author=arguments["target_author"],
                 target_timestamp=arguments["target_timestamp"],
-                poll_id=arguments["poll_id"],
                 recipient=arguments.get("recipient"),
                 group_id=arguments.get("group_id"),
             )

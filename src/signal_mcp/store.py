@@ -117,6 +117,15 @@ def init_db() -> None:
                 error       TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_messages(status, send_at);
+            -- signal-cli's sendPollVote requires a "vote-count" that must increase by 1
+            -- each time this account votes on a given poll (identified by the poll
+            -- message's author+timestamp, not a separate poll ID — signal-cli has none).
+            CREATE TABLE IF NOT EXISTS poll_votes (
+                poll_author    TEXT NOT NULL,
+                poll_timestamp INTEGER NOT NULL,
+                vote_count     INTEGER NOT NULL,
+                PRIMARY KEY (poll_author, poll_timestamp)
+            );
         """)
         # Migrate: add recipient column if upgrading from pre-1.1 schema
         try:
@@ -705,6 +714,25 @@ def cancel_scheduled_message(row_id: int) -> bool:
             (row_id,),
         )
         return cur.rowcount > 0
+
+
+# ── poll votes ───────────────────────────────────────────────────────────────
+
+def get_and_increment_vote_count(poll_author: str, poll_timestamp: int) -> int:
+    """Return the next vote-count for a poll (1 on first vote, +1 each re-vote)."""
+    init_db()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT vote_count FROM poll_votes WHERE poll_author = ? AND poll_timestamp = ?",
+            (poll_author, poll_timestamp),
+        ).fetchone()
+        next_count = (row["vote_count"] + 1) if row else 1
+        conn.execute(
+            "INSERT INTO poll_votes (poll_author, poll_timestamp, vote_count) VALUES (?, ?, ?)"
+            " ON CONFLICT (poll_author, poll_timestamp) DO UPDATE SET vote_count = excluded.vote_count",
+            (poll_author, poll_timestamp, next_count),
+        )
+        return next_count
 
 
 # ── meta key-value store ───────────────────────────────────────────────────────

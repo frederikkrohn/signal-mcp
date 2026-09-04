@@ -349,7 +349,10 @@ class SignalClient:
         await self._rate_limiter.acquire()
         params: dict = {"groupId": group_id, "message": message}
         if mentions:
-            params["mention"] = mentions
+            # signal-cli's mention parser only accepts "start:length:author" strings
+            # (it calls Pattern.matcher() on each element) — a JSON object throws
+            # ClassCastException on signal-cli's side.
+            params["mention"] = [f"{m['start']}:{m['length']}:{m['author']}" for m in mentions]
         if quote_author and quote_timestamp:
             params["quoteAuthor"] = quote_author
             params["quoteTimestamp"] = quote_timestamp
@@ -1311,12 +1314,15 @@ class SignalClient:
         if not recipient and not group_id:
             raise SignalError("Either recipient or group_id must be provided")
         await self._rate_limiter.acquire()
+        # signal-cli's real CLI/RPC keys are "question"/"option"/"no-multi" (multi-select
+        # is ON by default, disabled via no-multi) — not "poll-question"/"poll-options"/
+        # "poll-multi-select", which don't exist and were silently dropped/ignored.
         params: dict = {
-            "poll-question": question,
-            "poll-options": options,
+            "question": question,
+            "option": options,
         }
-        if multi_select:
-            params["poll-multi-select"] = True
+        if not multi_select:
+            params["no-multi"] = True
         if group_id:
             params["groupId"] = group_id
         else:
@@ -1329,19 +1335,25 @@ class SignalClient:
         self,
         target_author: str,
         target_timestamp: int,
-        poll_id: int,
         votes: list[int],
         recipient: str | None = None,
         group_id: str | None = None,
     ) -> None:
-        """Vote on an existing poll."""
+        """Vote on an existing poll (identified by its author + message timestamp).
+
+        signal-cli requires an incrementing vote-count per poll to allow re-votes;
+        that's tracked locally and applied automatically.
+        """
         if not recipient and not group_id:
             raise SignalError("Either recipient or group_id must be provided")
+        vote_count = await asyncio.to_thread(
+            _store.get_and_increment_vote_count, target_author, target_timestamp
+        )
         params: dict = {
-            "targetAuthor": target_author,
-            "targetTimestamp": target_timestamp,
-            "poll-id": poll_id,
-            "poll-answer": votes,
+            "poll-author": target_author,
+            "poll-timestamp": target_timestamp,
+            "option": votes,
+            "vote-count": vote_count,
         }
         if group_id:
             params["groupId"] = group_id
@@ -1353,17 +1365,18 @@ class SignalClient:
         self,
         target_author: str,
         target_timestamp: int,
-        poll_id: int,
         recipient: str | None = None,
         group_id: str | None = None,
     ) -> None:
-        """Terminate (end) a poll you created."""
+        """Terminate (end) a poll you created (identified by its message timestamp).
+
+        target_author is accepted for API symmetry with vote_poll but signal-cli's
+        sendPollTerminate only needs poll-timestamp — you can only terminate your own polls.
+        """
         if not recipient and not group_id:
             raise SignalError("Either recipient or group_id must be provided")
         params: dict = {
-            "targetAuthor": target_author,
-            "targetTimestamp": target_timestamp,
-            "poll-id": poll_id,
+            "poll-timestamp": target_timestamp,
         }
         if group_id:
             params["groupId"] = group_id
