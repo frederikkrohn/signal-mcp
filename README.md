@@ -458,7 +458,7 @@ Plus tools with no direct signal-cli equivalent: `get_conversation`, `search_mes
 
 ### Not covered
 
-These commands are deliberately excluded — they are not feasible to implement as MCP tools:
+These commands are deliberately excluded — either not feasible to implement as MCP tools, or consciously left out (see the reason for each):
 
 | signal-cli command | Why |
 |---|---|
@@ -466,6 +466,8 @@ These commands are deliberately excluded — they are not feasible to implement 
 | `register` / `verify` / `link` / `unregister` | One-time account setup; must be done before installing signal-mcp |
 | `deleteLocalAccountData` | Irreversibly destroys all local Signal data; too destructive to expose |
 | `sendPaymentNotification` | MobileCoin payments (requires a funded wallet; out of scope) |
+| `sendStory` | Added in signal-cli 0.14.6. Feasible, but consciously not added — no use case yet |
+| `terminateGroup` | Added in signal-cli 0.14.8 (GroupsV2 "end group"). Feasible, but consciously not added — irreversible for every member, so it would need a confirmation gate like `clear_local_store` |
 
 ## Development
 
