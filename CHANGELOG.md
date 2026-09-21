@@ -2,6 +2,18 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.36.1] — 2026-09-21
+
+### Fixed
+
+- **`Dockerfile` could never build** — the signal-cli download step extracted `signal-cli-<ver>-Linux-native/bin/signal-cli`, but the `Linux-native` tarball contains only a single top-level `signal-cli` executable, so `tar` failed with "Not found in archive" (reproduced against the real 0.14.3 tarball). Now extracts `signal-cli` directly. Verified the extraction against the 0.14.8 tarball (x86-64 ELF); the Docker image itself was not built (no Docker daemon available). The native binary is x86-64 only.
+
+### Changed
+
+- **Bundled signal-cli bumped 0.14.3 → 0.14.8.** signal-cli's README notes that Signal's official clients expire after three months, after which the server can make incompatible changes; 0.14.3 (April) was past that.
+
+---
+
 ## [1.36.0] — 2026-09-04
 
 ### Fixed
