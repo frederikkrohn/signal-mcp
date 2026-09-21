@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.36.2] — 2026-09-21
+
+### Changed
+
+- **README:** `sendStory` (signal-cli 0.14.6) and `terminateGroup` (0.14.8) are now listed under "Not covered" as consciously not added — both are feasible, but stories have no use case yet and terminating a group is irreversible for every member. The section intro no longer claims everything listed there is infeasible. No code changes.
+
+---
+
 ## [1.36.1] — 2026-09-21
 
 ### Fixed
