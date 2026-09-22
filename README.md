@@ -299,6 +299,7 @@ signal-mcp install-service   # starts on login, works on macOS and Linux
 ```bash
 # Status & daemon
 signal-mcp status                          # account + daemon info
+signal-mcp doctor                          # onboarding smoke test: signal-cli, account, daemon, receive health
 signal-mcp daemon                          # start daemon in foreground
 signal-mcp stop                            # stop the daemon
 

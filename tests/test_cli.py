@@ -80,6 +80,145 @@ def test_status_stopped(runner):
     assert "stopped" in result.output
 
 
+# ── doctor ────────────────────────────────────────────────────────────────────
+
+def test_doctor_all_pass(runner, tmp_path):
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[{"id": 1, "name": "Phone"}])
+    client.receive_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 0
+    assert "OK" in result.output
+    assert "✗" not in result.output
+
+
+def test_doctor_signal_cli_missing(runner):
+    with patch("signal_mcp.cli.check_signal_cli_version", side_effect=RuntimeError("signal-cli not found")), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=_mock_client()), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=None):
+        result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 1
+    assert "signal-cli not found" in result.output
+    assert "FAILED" in result.output
+
+
+def test_doctor_no_account(runner):
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", side_effect=RuntimeError("no account")):
+        result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 1
+    assert "no account" in result.output
+    assert "stopping early" in result.output
+
+
+def test_doctor_daemon_not_running(runner):
+    client = _mock_client()
+    client._daemon_alive = AsyncMock(return_value=False)
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 1
+    assert "signal-mcp daemon" in result.output
+
+
+def test_doctor_devices_and_receive_fail(runner, tmp_path):
+    client = _mock_client()
+    client.list_devices = AsyncMock(side_effect=TimeoutError())
+    client.receive_messages = AsyncMock(side_effect=Exception("boom"))
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 1
+    assert "Devices readable" in result.output
+    assert "Receive round-trip works" in result.output
+    assert "FAILED" in result.output
+
+
+def test_doctor_multiple_devices_note(runner, tmp_path):
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[
+        {"id": 1, "name": "Phone"}, {"id": 2, "name": None},
+    ])
+    client.receive_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert "Multiple devices linked" in result.output
+
+
+def test_doctor_receive_skipped_when_service_installed(runner, tmp_path):
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[{"id": 1, "name": "Phone"}])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=True), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert "skipped" in result.output
+    client.receive_messages.assert_not_called()
+
+
+def test_doctor_no_account_data_dir(runner):
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[{"id": 1, "name": "Phone"}])
+    client.receive_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=None):
+        result = runner.invoke(cli, ["doctor"])
+    assert "could not locate account data dir" in result.output
+    assert result.exit_code == 1
+
+
+def test_doctor_clean_msg_cache_dir(runner, tmp_path):
+    (tmp_path / "msg-cache").mkdir()
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[{"id": 1, "name": "Phone"}])
+    client.receive_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert "msg-cache readable — clean" in result.output
+    assert result.exit_code == 0
+
+
+def test_doctor_stuck_msg_cache(runner, tmp_path):
+    cache_dir = tmp_path / "msg-cache"
+    cache_dir.mkdir()
+    (cache_dir / "stuck_entry").write_text("x")
+    client = _mock_client()
+    client.list_devices = AsyncMock(return_value=[{"id": 1, "name": "Phone"}])
+    client.receive_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.cli.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli.get_account_data_dir", return_value=tmp_path):
+        result = runner.invoke(cli, ["doctor"])
+    assert "stuck_entry" in result.output
+    assert result.exit_code == 1
+
+
 # ── send ──────────────────────────────────────────────────────────────────────
 
 def test_send_message(runner):

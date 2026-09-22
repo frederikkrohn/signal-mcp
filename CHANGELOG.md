@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.37.0] — 2026-09-22
+
+### Added
+
+- **`signal-mcp doctor`** — an onboarding smoke test that catches, in one run, the class of setup failures this project has hit in practice: signal-cli missing or too old, no account detected, daemon not running, `listDevices`/`receive` round-trips actually working (not just the port being open), and stale entries in signal-cli's `msg-cache` that can silently kill the receive thread on daemon startup. When the account has multiple linked devices, it also explains that only device 1 is primary and several write tools (`update_configuration`, `block_contact`, `set_pin`, `add_device`, ...) fail on any other device — signal-cli's JSON-RPC doesn't expose which device *this* instance is, so it can't check that automatically. Skips the direct receive probe (which would otherwise always fail) when the background watch service is installed and already holds signal-cli's receive lock. Exits non-zero if any check fails.
+
+---
+
 ## [1.36.2] — 2026-09-21
 
 ### Changed

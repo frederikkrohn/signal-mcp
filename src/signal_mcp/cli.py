@@ -12,7 +12,13 @@ import click
 
 from . import __version__, store as _store
 from .client import _E164_RE, SignalClient, SignalError
-from .config import DAEMON_PORT, detect_account
+from .config import (
+    DAEMON_PORT,
+    check_signal_cli_version,
+    detect_account,
+    get_account_data_dir,
+    is_service_installed,
+)
 
 
 def run(coro):
@@ -463,6 +469,100 @@ def status():
             click.echo(f"Daemon  : {state} (port {DAEMON_PORT})")
             click.echo(f"Version : signal-mcp {__version__}")
     run(_run())
+
+
+# ── doctor ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+def doctor():
+    """Run onboarding smoke checks: signal-cli, account, daemon, receive health."""
+    ok = True
+
+    def check(label: str, passed: bool, detail: str = ""):
+        nonlocal ok
+        ok = ok and passed
+        mark = "✓" if passed else "✗"
+        click.echo(f"[{mark}] {label}" + (f" — {detail}" if detail else ""))
+
+    try:
+        check_signal_cli_version()
+        check("signal-cli installed and recent enough", True)
+    except Exception as e:
+        check("signal-cli installed and recent enough", False, str(e))
+
+    try:
+        account = detect_account()
+        check("Signal account detected", True, account)
+    except Exception as e:
+        check("Signal account detected", False, str(e))
+        click.echo(f"\n{'OK' if ok else 'FAILED'} — stopping early, nothing else to check without an account.")
+        sys.exit(0 if ok else 1)
+
+    async def _run():
+        nonlocal ok
+        async with SignalClient(account=account) as client:
+            alive = await client._daemon_alive()
+            check("Daemon reachable", alive, f"port {DAEMON_PORT}" if alive else "run: signal-mcp daemon")
+            if not alive:
+                return
+
+            try:
+                devices = await client.list_devices()
+                names = ", ".join(f"{d['id']}:{d.get('name') or '(unnamed)'}" for d in devices)
+                check("Devices readable", True, f"{len(devices)} linked — {names}")
+                if len(devices) > 1:
+                    click.echo(
+                        "    Multiple devices linked — identify which one is this account below. "
+                        "Only device 1 is primary; write tools like update_configuration, "
+                        "block_contact, set_pin, add_device fail on any other device with "
+                        "\"This command doesn't work on linked devices\". This check can't tell "
+                        "which device this signal-mcp instance is (signal-cli doesn't expose it "
+                        "over JSON-RPC) — match by name/last-seen, or just try one of those tools."
+                    )
+            except Exception as e:
+                check("Devices readable", False, f"{type(e).__name__}: {e}")
+
+            if is_service_installed():
+                # The background watcher (signal-mcp receive --watch) holds signal-cli's
+                # receive lock continuously — calling receive here would only fail with
+                # "Receive command cannot be used if messages are already being received",
+                # not tell us anything real. Check the watcher's own liveness instead.
+                check(
+                    "Receive round-trip works", True,
+                    "skipped — background watch service is installed and holds the "
+                    "receive lock; check its own log instead (~/.local/share/signal-mcp/watch.err)",
+                )
+            else:
+                try:
+                    await client.receive_messages(timeout=3)
+                    check("Receive round-trip works", True)
+                except Exception as e:
+                    check("Receive round-trip works", False, f"{type(e).__name__}: {e}")
+
+        data_dir = get_account_data_dir(account)
+        if data_dir is None:
+            check("msg-cache readable", False, "could not locate account data dir")
+        else:
+            cache_dir = data_dir / "msg-cache"
+            if not cache_dir.exists():
+                check("msg-cache readable", True, "empty")
+            else:
+                stuck = [f for f in cache_dir.iterdir() if f.is_file()]
+                if stuck:
+                    names = ", ".join(f.name for f in stuck[:5])
+                    check(
+                        "msg-cache readable", False,
+                        f"{len(stuck)} unprocessed entr{'y' if len(stuck) == 1 else 'ies'} "
+                        f"({names}) — a malformed one can crash the receive thread on daemon "
+                        f"startup (silently, no messages come in); move them out of {cache_dir} "
+                        "if receive stops working after this",
+                    )
+                else:
+                    check("msg-cache readable", True, "clean")
+
+    run(_run())
+    click.echo(f"\n{'OK' if ok else 'FAILED'}")
+    sys.exit(0 if ok else 1)
 
 
 # ── daemon ────────────────────────────────────────────────────────────────────
