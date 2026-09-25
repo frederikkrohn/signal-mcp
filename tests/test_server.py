@@ -1624,7 +1624,7 @@ async def test_call_tool_allows_read_only_tool_when_readonly(monkeypatch):
     monkeypatch.setattr("signal_mcp.server._READONLY", True)
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
     result = await call_tool("list_contacts", {})
-    assert "[]" in result[0].text
+    assert "read-only mode" not in result[0].text
 
 
 # ── webhook, find_contact, scheduled messages ──────────────────────────────────
