@@ -459,11 +459,14 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
         if progress_cb:
             progress_cb("Importing messages…")
 
-        # 4. Parse messages — resolve own number for outgoing sender attribution
+        # 4. Parse messages — resolve own number for outgoing sender attribution.
+        # A silent fallback to "" here would make every outgoing message's sender
+        # fall back to the literal string "me" (see _read_messages_from_plain_db),
+        # permanently misattributing every message the user ever sent.
         try:
             own_number = detect_account()
-        except Exception:
-            own_number = ""
+        except Exception as e:
+            raise DesktopImportError(f"Could not detect your Signal account: {e}") from e
         messages = _read_messages_from_plain_db(plain_db, own_number=own_number, since_ms=since_ms)
         total = len(messages)
         imported = 0

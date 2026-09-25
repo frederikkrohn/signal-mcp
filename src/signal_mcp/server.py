@@ -1497,6 +1497,8 @@ TOOLS += [
     ),
 ]
 
+_TOOL_NAMES = {t.name for t in TOOLS}
+
 
 async def _list_tools(ctx: ServerRequestContext, params: RequestParams) -> ListToolsResult:
     return ListToolsResult(tools=TOOLS)
@@ -1507,12 +1509,15 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
     arguments = params.arguments or {}
     client = get_client()  # noqa: F841 — used throughout the giant match below
 
-    try:
-        if name not in _DAEMON_FREE:
-            await client.ensure_daemon()
+    # Validate the tool exists and has its required parameters BEFORE touching the
+    # daemon. Previously ensure_daemon() ran first, so an unknown tool name or a
+    # missing argument reported "daemon failed to start" instead of the real problem
+    # whenever the daemon itself couldn't start — masking the actual error.
+    if name not in _TOOL_NAMES:
+        return _err(f"Unknown tool: {name}")
 
-        # Validate required parameters up front (gives clean error instead of KeyError)
-        _REQUIRED: dict[str, list[str]] = {
+    # Required parameters, per tool (gives a clean error instead of KeyError)
+    _REQUIRED: dict[str, list[str]] = {
             "send_message":         ["recipient", "message"],
             "send_group_message":   ["group_id", "message"],
             "send_note_to_self":    ["message"],
@@ -1563,10 +1568,14 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             "finish_change_number":           ["number", "verification_code"],
             "submit_rate_limit_challenge":    ["challenge", "captcha"],
         }
-        if name in _REQUIRED:
-            err = _require(arguments, *_REQUIRED[name])
-            if err:
-                return _err(err)
+    if name in _REQUIRED:
+        err = _require(arguments, *_REQUIRED[name])
+        if err:
+            return _err(err)
+
+    try:
+        if name not in _DAEMON_FREE:
+            await client.ensure_daemon()
 
         if name == "send_message":
             result = await client.send_message(

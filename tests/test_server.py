@@ -65,6 +65,25 @@ async def test_tool_unknown():
     assert "Unknown tool" in result[0].text
 
 
+@pytest.mark.asyncio
+async def test_unknown_tool_and_missing_param_never_touch_the_daemon(reset_client):
+    """An unknown tool name or a missing required argument must be rejected before
+    ensure_daemon() runs — otherwise a daemon that fails to start reports 'daemon
+    failed to start' for these instead of the real, cheaper-to-diagnose problem."""
+    spy = MagicMock()
+    async def tracked_ensure_daemon(*a, **kw):
+        spy()
+    reset_client.ensure_daemon = tracked_ensure_daemon
+
+    result = await call_tool("nonexistent_tool", {})
+    assert "Unknown tool" in result[0].text
+    spy.assert_not_called()
+
+    result = await call_tool("send_message", {"recipient": "+19999999999"})  # missing "message"
+    assert "Missing required parameter" in result[0].text
+    spy.assert_not_called()
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_tool_block_contact():

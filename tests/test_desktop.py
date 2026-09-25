@@ -791,27 +791,21 @@ def test_import_progress_other_platform(tmp_path):
 
 
 def test_import_detect_account_failure(tmp_path):
-    """import_from_desktop uses empty own_number when detect_account raises."""
+    """import_from_desktop raises instead of silently falling back to own_number="" —
+    a silent fallback would permanently misattribute every outgoing message's sender
+    to the literal string "me" (see _read_messages_from_plain_db)."""
     signal_dir = _make_signal_dir(tmp_path)
 
-    from signal_mcp.desktop import import_from_desktop
-    from signal_mcp.models import Message
+    from signal_mcp.desktop import import_from_desktop, DesktopImportError
     fake_plain = tmp_path / "plain_acct.db"
     fake_plain.write_bytes(b"x")
-    msg = Message(id="a1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))
 
     with patch("signal_mcp.desktop._get_db_key_hex", return_value="aa" * 32), \
          patch("signal_mcp.desktop._decrypt_db_to_temp", return_value=fake_plain), \
-         patch("signal_mcp.desktop._read_messages_from_plain_db", return_value=[msg]) as mock_read, \
-         patch("signal_mcp.desktop._store") as mock_store, \
+         patch("signal_mcp.desktop._store"), \
          patch("signal_mcp.desktop.detect_account", side_effect=RuntimeError("no account")):
-        mock_store.save_message.return_value = True
-        result = import_from_desktop(signal_dir=signal_dir)
-
-    # Should succeed with own_number="" (outgoing messages attributed to "me")
-    assert result["total"] == 1
-    # _read_messages_from_plain_db called with own_number=""
-    mock_read.assert_called_once_with(fake_plain, own_number="", since_ms=0)
+        with pytest.raises(DesktopImportError, match="Could not detect your Signal account"):
+            import_from_desktop(signal_dir=signal_dir)
 
 
 def test_import_skipped_count(tmp_path):
