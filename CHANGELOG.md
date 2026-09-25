@@ -2,6 +2,20 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.2] — 2026-09-25
+
+### Fixed
+
+- **A 200 response from signal-cli's daemon can still carry per-recipient send failures** (e.g. `UNREGISTERED_FAILURE`, `IDENTITY_FAILURE`) nested in a `results` array — previously returned as if the send succeeded. `_rpc` now raises `SignalError` when it finds one.
+- **`receive_direct` never checked the signal-cli subprocess's exit code**, so a failed `receive` silently returned an empty/partial message list instead of raising.
+- **`_ensure_contact_cache`/`_ensure_group_cache` caught bare `Exception`**, meant to tolerate "daemon not up yet" but actually swallowing any bug in the cache-refresh path. Narrowed to `SignalError` so real bugs propagate instead of silently leaving the cache permanently unpopulated.
+- **Several RPC call sites** (`list_contacts`, `list_groups`, `list_sticker_packs`, `get_user_status`, `list_accounts`, `create_group`, `join_group`) **silently substituted an empty list/dict when signal-cli returned an unexpected shape**, which read to the caller as "you have no contacts/groups" instead of an error. Now raise `SignalError` naming the RPC method.
+- **`get_webhook_url` returned `None` for a corrupt/unreadable `webhook.json`**, indistinguishable from "no webhook configured". Now raises `RuntimeError`.
+
+Bugs identified via a diff against `faces-sh/signal-mcp`'s fork; fixed directly against our existing `SignalError`/`RuntimeError` types rather than adopting the fork's envelope architecture.
+
+---
+
 ## [1.38.1] — 2026-09-25
 
 ### Fixed
