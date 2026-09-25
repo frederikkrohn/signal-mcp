@@ -1,8 +1,10 @@
 """Tests for Signal Desktop importer."""
 
 import json
+import signal
 import sqlite3
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1334,3 +1336,172 @@ def test_read_messages_zero_timestamp_after_since_filter(tmp_path):
     msgs = _read_messages_from_plain_db(db_path, since_ms=-1)
     # The Python guard `if not ts_ms: continue` kicks in and skips the row
     assert msgs == []
+
+
+# ── Stale plaintext file sweep ──────────────────────────────────────────────────
+
+def test_sweep_removes_only_stale_files(tmp_path):
+    """Files older than the threshold are deleted; fresh files are left alone."""
+    import os as _os
+    from signal_mcp.desktop import _sweep_stale_plaintext_files
+
+    plaintext_dir = tmp_path / "plaintext-tmp"
+    plaintext_dir.mkdir()
+    old_file = plaintext_dir / "orphaned.db"
+    old_file.write_bytes(b"leftover")
+    fresh_file = plaintext_dir / "fresh.db"
+    fresh_file.write_bytes(b"current")
+
+    now = time.time()
+    _os.utime(old_file, (now - 7200, now - 7200))  # 2 hours old
+    _os.utime(fresh_file, (now, now))
+
+    with patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", plaintext_dir):
+        _sweep_stale_plaintext_files()
+
+    assert not old_file.exists()
+    assert fresh_file.exists()
+
+
+def test_sweep_noop_when_dir_missing(tmp_path):
+    from signal_mcp.desktop import _sweep_stale_plaintext_files
+
+    with patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "does-not-exist"):
+        _sweep_stale_plaintext_files()  # must not raise
+
+
+# ── SIGTERM/SIGINT cleanup handler ──────────────────────────────────────────────
+
+def test_termination_handler_deletes_active_plain_db(tmp_path):
+    """The registered handler deletes the in-flight plaintext file before
+    resuming default signal behavior. True signal delivery isn't practical to
+    test in pytest, so this calls the handler function directly and stubs
+    os.kill to avoid actually terminating the test process."""
+    import signal_mcp.desktop as _desktop
+
+    plain_db = tmp_path / "plain.db"
+    plain_db.write_bytes(b"data")
+    _desktop._active_plain_db = plain_db
+
+    with patch("signal_mcp.desktop.os.kill") as mock_kill, \
+         patch("signal_mcp.desktop.signal.signal") as mock_signal:
+        _desktop._handle_termination_signal(signal.SIGTERM, None)
+
+    assert not plain_db.exists()
+    mock_signal.assert_called_once_with(signal.SIGTERM, signal.SIG_DFL)
+    mock_kill.assert_called_once()
+    _desktop._active_plain_db = None
+
+
+def test_termination_handler_noop_without_active_plain_db():
+    import signal_mcp.desktop as _desktop
+
+    _desktop._active_plain_db = None
+    with patch("signal_mcp.desktop.os.kill"), patch("signal_mcp.desktop.signal.signal"):
+        _desktop._handle_termination_signal(signal.SIGINT, None)  # must not raise
+
+
+# ── Single-flight lock against concurrent Desktop imports ──────────────────────
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._read_messages_from_plain_db")
+@patch("signal_mcp.desktop._store")
+def test_import_raises_when_lock_already_held(
+    mock_store, mock_read, mock_decrypt_db, mock_decrypt_key, mock_keychain,
+    mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    lock_file = tmp_path / "desktop-import.lock"
+    lock_file.write_text("99999")  # fake PID held by "another process"
+
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file), \
+             pytest.raises(DesktopImportError, match="already in progress"):
+            import_from_desktop()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg
+
+    mock_decrypt_db.assert_not_called()
+
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._read_messages_from_plain_db")
+@patch("signal_mcp.desktop._store")
+def test_import_releases_lock_after_success(
+    mock_store, mock_read, mock_decrypt_db, mock_decrypt_key, mock_keychain,
+    mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+    from signal_mcp.models import Message
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    mock_decrypt_key.return_value = "aabbccdd" * 4
+    fake_plain = tmp_path / "plain.db"
+    fake_plain.write_bytes(b"x")
+    mock_decrypt_db.return_value = fake_plain
+    mock_read.return_value = [Message(id="m1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))]
+    mock_store.save_message.return_value = True
+
+    lock_file = tmp_path / "desktop-import.lock"
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file):
+            import_from_desktop()
+            assert not lock_file.exists()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg
+
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._store")
+def test_import_releases_lock_after_failure(
+    mock_store, mock_decrypt_db, mock_decrypt_key, mock_keychain, mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    mock_decrypt_key.return_value = "aabbccdd" * 4
+    mock_decrypt_db.side_effect = DesktopImportError("sqlcipher failed: boom")
+
+    lock_file = tmp_path / "desktop-import.lock"
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file):
+            with pytest.raises(DesktopImportError, match="sqlcipher failed"):
+                import_from_desktop()
+            assert not lock_file.exists()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg
