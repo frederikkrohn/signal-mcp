@@ -298,6 +298,52 @@ async def test_ensure_contact_cache_populates(client):
     assert client_mod._contact_cache_loaded is True
 
 
+# ── _ensure_contact_cache merges Signal Desktop names ────────────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_fills_gap_with_desktop_name(client):
+    """A contact signal-cli doesn't know at all should still get a name if
+    Signal Desktop (via import_desktop/sync_desktop) has one on file."""
+    _store_mod.save_conversation("uuid-only-1", "Bob (from Desktop)", "direct")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock, return_value=[]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("uuid-only-1") == "Bob (from Desktop)"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_signal_cli_name_wins_over_desktop(client):
+    """A real name already known to signal-cli (or manually set via
+    update_contact) must never be overwritten by a Desktop-sourced name."""
+    _store_mod.save_conversation("+1999", "Alice (Desktop's guess)", "direct")
+    contact = Contact(number="+1999", name="Alice Curated")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      return_value=[contact]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("+1999") == "Alice Curated"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_desktop_name_fills_unnamed_signal_cli_contact(client):
+    """A signal-cli contact with no name set has display_name == its own
+    number — that counts as a gap the Desktop name should still fill."""
+    _store_mod.save_conversation("+1999", "Alice (from Desktop)", "direct")
+    contact = Contact(number="+1999")  # no name/profile_name set
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      return_value=[contact]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("+1999") == "Alice (from Desktop)"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_ignores_desktop_group_names(client):
+    """Only 'direct' conversation names are merged into the contact cache —
+    group names belong in the group cache, not here."""
+    _store_mod.save_conversation("grp==", "Some Group", "group")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock, return_value=[]):
+        await client._ensure_contact_cache()
+    assert "grp==" not in client_mod._contact_cache
+
+
 # ── _ensure_group_cache failure ──────────────────────────────────────────────
 
 @pytest.mark.asyncio

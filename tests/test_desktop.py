@@ -13,6 +13,7 @@ from signal_mcp.desktop import (
     DesktopImportError,
     _decode_group_id,
     _decrypt_key,
+    _read_conversation_names,
     _read_messages_from_plain_db,
     import_from_desktop,
 )
@@ -152,6 +153,52 @@ def test_read_messages_timestamps(tmp_path):
     db = _make_plain_db(tmp_path)
     messages = _read_messages_from_plain_db(db)
     assert any(m.body == "Hallo" for m in messages)
+
+
+# ── _read_conversation_names ─────────────────────────────────────────────────
+
+def test_read_conversation_names_keys_direct_contact_by_e164(tmp_path):
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE conversations ADD COLUMN name TEXT")
+    conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT")
+    conn.execute("UPDATE conversations SET name = 'Alice', type = 'private' WHERE id = 'conv1'")
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db)
+    assert ("+49111", "Alice", "direct") in names
+
+
+def test_read_conversation_names_falls_back_to_service_id_without_e164(tmp_path):
+    """A contact with no phone number stored is still someone worth naming."""
+    db_path = tmp_path / "no-number.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, "
+        "groupId TEXT, type TEXT, name TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO conversations VALUES ('c1', NULL, 'uuid-only', NULL, 'private', 'Bob')"
+    )
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db_path)
+    assert ("uuid-only", "Bob", "direct") in names
+
+
+def test_read_conversation_names_group(tmp_path):
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE conversations ADD COLUMN name TEXT")
+    conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT")
+    conn.execute("UPDATE conversations SET name = 'Team', type = 'group' WHERE id = 'grp1'")
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db)
+    assert ("group-abc", "Team", "group") in names
 
 
 def test_outgoing_direct_message_gets_a_recipient(tmp_path):

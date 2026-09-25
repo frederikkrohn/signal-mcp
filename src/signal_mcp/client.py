@@ -747,6 +747,16 @@ class SignalClient:
                     _contact_cache[c.number] = c.display_name
                 if c.uuid:
                     _contact_cache[c.uuid] = c.display_name
+            # Signal Desktop (via import_desktop/sync_desktop) often knows more
+            # people by name than have been pushed into signal-cli's own contact
+            # list. Fill gaps only — signal-cli's own name (or a manual
+            # update_contact) always wins. A signal-cli contact with no real name
+            # set has display_name == its own number/uuid, which counts as a gap.
+            desktop_names = await asyncio.to_thread(_store.get_conversation_names, "direct")
+            for conv_id, name in desktop_names.items():
+                existing = _contact_cache.get(conv_id)
+                if not existing or existing == conv_id:
+                    _contact_cache[conv_id] = name
             _contact_cache_loaded = True   # only set on success
             _contact_cache_at = time.monotonic()
         except Exception:

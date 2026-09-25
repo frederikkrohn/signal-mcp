@@ -368,6 +368,9 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
         if not name_expr_parts:
             return []
         name_expr = f"COALESCE({', '.join(f'NULLIF({p}, \"\")' for p in name_expr_parts)})"
+        # A contact with no phone number stored is still someone worth naming —
+        # older schemas have no serviceId column at all, so detect rather than assume.
+        service_col = "c.serviceId" if "serviceId" in conv_cols else "NULL"
 
         rows = conn.execute(
             f"""SELECT
@@ -375,6 +378,7 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
                 c.type,
                 c.groupId,
                 c.e164,
+                {service_col} AS service_id,
                 {name_expr} AS display_name
             FROM conversations c
             WHERE display_name IS NOT NULL AND display_name != ''"""
@@ -388,6 +392,8 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
                 result.append((group_id, row["display_name"], "group"))
             elif row["e164"]:
                 result.append((row["e164"], row["display_name"], "direct"))
+            elif row["service_id"]:
+                result.append((row["service_id"], row["display_name"], "direct"))
         return result
     finally:
         conn.close()
