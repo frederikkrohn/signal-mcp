@@ -14,6 +14,13 @@ All notable changes to signal-mcp are documented here.
 
 - `import-desktop` / `sync-desktop` print the "macOS may ask for Keychain access" note on macOS only, and the `import-desktop` help text no longer says it requires the macOS Keychain. README setup steps for the Desktop import now cover Linux. (#8)
 
+## [1.38.5] — 2026-09-25
+
+### Performance
+
+- **Signal Desktop import committed to SQLite once per message** — a multi-thousand-message history did thousands of individual commits. Added `store.save_messages_batch` and switched the import loop to commit in chunks of 500, cutting import time for large histories.
+- **`webhook.post_webhook_batch` fired all outbound POSTs concurrently with no cap** — a large catch-up batch (e.g. after being offline) could open hundreds of simultaneous connections to the webhook endpoint at once. Capped concurrency to 10 in-flight requests via a semaphore.
+
 ## [1.38.4] — 2026-09-25
 
 ### Fixed

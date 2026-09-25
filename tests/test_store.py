@@ -48,6 +48,31 @@ def test_duplicate_not_saved():
     assert len(results) == 1
 
 
+def test_save_messages_batch_empty():
+    assert store.save_messages_batch([]) == (0, 0)
+
+
+def test_save_messages_batch_imports_and_dedups():
+    msgs = [make_msg(id=str(i), sender="+300") for i in range(5)]
+    imported, skipped = store.save_messages_batch(msgs)
+    assert (imported, skipped) == (5, 0)
+    results = store.get_conversation("+300")
+    assert len(results) == 5
+
+    # Re-importing the same batch plus one new message dedups the old ones
+    imported, skipped = store.save_messages_batch(msgs + [make_msg(id="new", sender="+300")])
+    assert (imported, skipped) == (1, 5)
+
+
+def test_save_messages_batch_saves_attachments():
+    msg = make_msg(id="att1", sender="+301")
+    msg.attachments = [Attachment(content_type="image/png", filename="a.png", local_path="/tmp/a.png", size=10)]
+    store.save_messages_batch([msg])
+    results = store.get_conversation("+301")
+    assert len(results[0].attachments) == 1
+    assert results[0].attachments[0].filename == "a.png"
+
+
 def test_outgoing_message_marked_read():
     """Messages saved with recipient (outgoing) should be is_read=1."""
     store.save_message(make_msg(id="out1", sender="+me", recipient="+other"))

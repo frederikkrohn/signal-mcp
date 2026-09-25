@@ -174,6 +174,45 @@ def save_message(msg: Message) -> bool:
     return True
 
 
+def save_messages_batch(messages: list[Message]) -> tuple[int, int]:
+    """Save multiple messages in a single transaction. Returns (imported, skipped) counts.
+
+    Same INSERT OR IGNORE dedup semantics as save_message(), but avoids one
+    commit per message — used by bulk imports (e.g. Signal Desktop import)
+    where thousands of per-message commits would dominate runtime.
+    """
+    if not messages:
+        return 0, 0
+    init_db()
+    imported = 0
+    skipped = 0
+    with _db() as conn:
+        for msg in messages:
+            is_read = 1 if msg.recipient is not None else int(msg.is_read)
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO messages"
+                " (id, sender, recipient, body, timestamp, group_id, quote_id, is_read)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (msg.id, msg.sender, msg.recipient, msg.body,
+                 int(msg.timestamp.timestamp() * 1000),
+                 msg.group_id, msg.quote_id, is_read),
+            )
+            if cur.rowcount == 0:
+                skipped += 1
+                continue
+            imported += 1
+            if msg.attachments:
+                conn.executemany(
+                    "INSERT INTO attachments"
+                    " (message_id, content_type, filename, local_path, size) VALUES (?,?,?,?,?)",
+                    [
+                        (msg.id, att.content_type, att.filename, att.local_path, att.size)
+                        for att in msg.attachments
+                    ],
+                )
+    return imported, skipped
+
+
 def _conversation_where(recipient: str, own_number: str = "") -> tuple[str, list]:
     """Build the WHERE clause + params matching messages exchanged with *recipient*.
 

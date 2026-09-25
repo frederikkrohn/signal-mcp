@@ -412,6 +412,7 @@ def test_import_from_desktop_success(
     msg = Message(id="m1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))
     mock_read.return_value = [msg]
     mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
 
     result = import_from_desktop()
 
@@ -957,6 +958,7 @@ def test_import_from_desktop_with_signal_dir_override(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         result = import_from_desktop(signal_dir=signal_dir)
 
     assert result["imported"] == 1
@@ -1005,12 +1007,13 @@ def test_import_progress_callbacks(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Keychain" in m or "macOS" in m for m in messages_logged), messages_logged
     assert any("Decrypting" in m for m in messages_logged)
     assert any("Importing" in m for m in messages_logged)
-    assert any("0/" in m for m in messages_logged)  # i=0 progress tick
+    assert any("/1 messages" in m for m in messages_logged)  # chunk progress tick
 
 
 def test_import_progress_linux(tmp_path):
@@ -1031,6 +1034,7 @@ def test_import_progress_linux(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Linux" in m or "libsecret" in m for m in messages_logged)
@@ -1054,6 +1058,7 @@ def test_import_progress_other_platform(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Decrypting" in m for m in messages_logged)
@@ -1092,7 +1097,8 @@ def test_import_skipped_count(tmp_path):
          patch("signal_mcp.desktop._read_messages_from_plain_db", return_value=[msg]), \
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
-        mock_store.save_message.return_value = False  # duplicate → skip
+        mock_store.save_message.return_value = False
+        mock_store.save_messages_batch.return_value = (0, 1)
         result = import_from_desktop(signal_dir=signal_dir)
 
     assert result["skipped"] == 1
@@ -1158,6 +1164,7 @@ def test_import_from_desktop_passes_since_ms(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         from signal_mcp.desktop import import_from_desktop
         import_from_desktop(signal_dir=signal_dir, since_ms=123456789)
 
@@ -1185,6 +1192,7 @@ def _make_sync_patches(tmp_path, messages=None, *, last_sync=None):
     mock_store = MagicMock()
     mock_store.get_meta.return_value = last_sync
     mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
     stack.enter_context(patch("signal_mcp.desktop._store", mock_store))
     stack.enter_context(patch("signal_mcp.desktop.detect_account", return_value="+49"))
     return stack, signal_dir, mock_store
@@ -1578,6 +1586,7 @@ def test_import_releases_lock_after_success(
     mock_decrypt_db.return_value = fake_plain
     mock_read.return_value = [Message(id="m1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))]
     mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
 
     lock_file = tmp_path / "desktop-import.lock"
     try:

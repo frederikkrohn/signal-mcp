@@ -630,16 +630,20 @@ def _run_desktop_import(db_path: Path, config_path: Path, progress_cb, since_ms:
         skipped = 0
         max_ts_ms = 0
 
-        for i, msg in enumerate(messages):
-            if _store.save_message(msg):
-                imported += 1
-            else:
-                skipped += 1
-            ts = int(msg.timestamp.timestamp() * 1000)
-            if ts > max_ts_ms:
-                max_ts_ms = ts
-            if progress_cb and i % 500 == 0:
-                progress_cb(f"  {i}/{total} messages…")
+        # Batch commits (one per 500 messages) instead of one commit per message —
+        # a multi-thousand-message history otherwise dominates runtime in fsync overhead.
+        _IMPORT_CHUNK = 500
+        for start in range(0, total, _IMPORT_CHUNK):
+            chunk = messages[start:start + _IMPORT_CHUNK]
+            n_imported, n_skipped = _store.save_messages_batch(chunk)
+            imported += n_imported
+            skipped += n_skipped
+            for msg in chunk:
+                ts = int(msg.timestamp.timestamp() * 1000)
+                if ts > max_ts_ms:
+                    max_ts_ms = ts
+            if progress_cb:
+                progress_cb(f"  {start + len(chunk)}/{total} messages…")
 
         # 5. Extract and store conversation names (groups + contacts)
         try:

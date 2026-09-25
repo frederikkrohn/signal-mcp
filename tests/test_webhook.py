@@ -7,6 +7,8 @@ import httpx
 import pytest
 import respx
 
+import asyncio
+
 from signal_mcp.models import Message
 from signal_mcp.webhook import post_webhook, post_webhook_batch
 
@@ -84,3 +86,23 @@ async def test_post_webhook_batch_mixed_results():
     with patch("signal_mcp.webhook.asyncio.sleep", new=AsyncMock()):
         result = await post_webhook_batch(WEBHOOK_URL, messages)
     assert result == 1
+
+
+@pytest.mark.asyncio
+async def test_post_webhook_batch_caps_concurrency():
+    """A large batch must never run more than _WEBHOOK_MAX_CONCURRENCY POSTs at once."""
+    state = {"current": 0, "max": 0}
+
+    async def fake_post_webhook(url, msg):
+        state["current"] += 1
+        state["max"] = max(state["max"], state["current"])
+        await asyncio.sleep(0.01)
+        state["current"] -= 1
+        return True
+
+    messages = [make_message(id_=str(i)) for i in range(30)]
+    with patch("signal_mcp.webhook.post_webhook", new=fake_post_webhook):
+        result = await post_webhook_batch(WEBHOOK_URL, messages)
+
+    assert result == 30
+    assert state["max"] <= 10
