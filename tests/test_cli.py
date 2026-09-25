@@ -738,3 +738,35 @@ def test_daemon_writes_and_clears_pid_file(monkeypatch, runner, tmp_path):
     assert mock_popen.call_args[0][0][:2] == ["signal-cli", "-u"]
     assert seen_pid_while_running["pid"] == "4242"
     assert not pid_file.exists()
+
+
+def test_daemon_clears_pid_on_sigterm(monkeypatch, runner, tmp_path):
+    """launchd sends SIGTERM (not SIGINT) on every stop/restart -- Python's
+    default SIGTERM disposition skips `finally` blocks, so this must be
+    handled explicitly rather than relying on the KeyboardInterrupt path."""
+    import signal as signal_mod
+
+    pid_file = tmp_path / "daemon.pid"
+    monkeypatch.setattr("signal_mcp.config.DAEMON_PID_FILE", pid_file)
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 4242
+    registered_handler = {}
+
+    def fake_wait():
+        # Simulate the real SIGTERM delivery a launchd stop/restart sends:
+        # invoke whatever handler daemon() registered for it, exactly as
+        # the OS would while proc.wait() is blocking.
+        handler = signal_mod.getsignal(signal_mod.SIGTERM)
+        registered_handler["handler"] = handler
+        handler(signal_mod.SIGTERM, None)
+    fake_proc.wait.side_effect = fake_wait
+
+    with patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.subprocess.Popen", return_value=fake_proc):
+        result = runner.invoke(cli, ["daemon"])
+
+    assert registered_handler["handler"] is not None
+    assert result.exit_code == 0
+    assert not pid_file.exists()
+    fake_proc.terminate.assert_called_once()

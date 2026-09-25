@@ -4,6 +4,7 @@ import asyncio
 import json
 import plistlib
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -587,6 +588,16 @@ def daemon(port: int):
         "--no-receive-stdout",
     ])
     save_daemon_pid(proc.pid)
+
+    def _handle_sigterm(signum, frame):  # pragma: no cover
+        # Python's default SIGTERM disposition kills the process without
+        # running `finally` blocks -- launchd sends exactly this signal on
+        # every stop/restart, so without a handler the PID file below never
+        # gets cleared on the realistic shutdown path (only on Ctrl+C).
+        proc.terminate()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     try:  # pragma: no cover
         proc.wait()
     except KeyboardInterrupt:  # pragma: no cover

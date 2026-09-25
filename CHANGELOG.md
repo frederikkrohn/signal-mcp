@@ -14,6 +14,12 @@ All notable changes to signal-mcp are documented here.
 
 - `import-desktop` / `sync-desktop` print the "macOS may ask for Keychain access" note on macOS only, and the `import-desktop` help text no longer says it requires the macOS Keychain. README setup steps for the Desktop import now cover Linux. (#8)
 
+## [1.38.6] — 2026-09-25
+
+### Fixed
+
+- **The 1.38.4 daemon-PID fix only handled Ctrl+C (`KeyboardInterrupt`), not `SIGTERM`** — the actual signal `launchctl kickstart` and every LaunchAgent stop/restart sends. Python's default SIGTERM disposition kills the process without running `finally` blocks, so `clear_daemon_pid()` never fired on the realistic restart path, leaving the PID file stale or, after further daemon-lifecycle churn, pointing nowhere. Added an explicit SIGTERM handler. Verified against the real LaunchAgent with 3 consecutive `launchctl kickstart -k` restarts — the PID file matched the live process every time.
+
 ## [1.38.5] — 2026-09-25
 
 ### Performance
