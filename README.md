@@ -175,6 +175,15 @@ signal-cli only delivers messages when polled. Install the background service so
 signal-mcp install-service   # starts on login, works on macOS and Linux
 ```
 
+### Step 7 — (Optional) Read-only mode
+
+Set `SIGNAL_MCP_READONLY=1` in the environment to restrict the server to read-only
+tools (listing, searching, and exporting existing local/remote state). Tools that
+send, edit, delete, or otherwise mutate your Signal account — messages, contacts,
+groups, devices, and settings — are hidden from tool listings and rejected if
+called directly. Useful when connecting an AI client you don't fully trust with
+write access to your real Signal account.
+
 ## MCP Tools
 
 ### Messaging
