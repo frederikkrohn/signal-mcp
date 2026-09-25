@@ -199,11 +199,22 @@ def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
     return db_key_bytes.hex()
 
 
+_PLAINTEXT_TMP_DIR = Path.home() / ".local" / "share" / "signal-mcp" / "tmp"
+
+
 def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
-    """Use sqlcipher CLI to export the encrypted DB to a plain SQLite file."""
+    """Use sqlcipher CLI to export the encrypted DB to a plain SQLite file.
+
+    The export is a full plaintext copy of the user's Signal message history,
+    so it goes in a private (0700), app-owned directory rather than the shared
+    system temp dir, and is unlinked on every failure path — a leaked copy
+    left behind on a decrypt failure would otherwise sit there indefinitely.
+    """
     sqlcipher = _find_sqlcipher()
     source = db_path or SIGNAL_DB
-    fd, tmp_str = tempfile.mkstemp(suffix=".db")
+    _PLAINTEXT_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    _PLAINTEXT_TMP_DIR.chmod(0o700)
+    fd, tmp_str = tempfile.mkstemp(suffix=".db", dir=str(_PLAINTEXT_TMP_DIR))
     os.close(fd)
     tmp = Path(tmp_str)
 
@@ -219,13 +230,19 @@ def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
         f".quit\n"
     )
 
-    result = subprocess.run(
-        [sqlcipher, str(source)],
-        input=script, capture_output=True, text=True, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [sqlcipher, str(source)],
+            input=script, capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     if result.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise DesktopImportError(f"sqlcipher failed: {result.stderr.strip()}")
     if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
         raise DesktopImportError("sqlcipher produced empty output — wrong key?")
 
     return tmp
@@ -279,6 +296,10 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
             else "NULL AS conv_service_id"
         )
 
+        # A reply's quote lives in the message's json blob; older or synthetic
+        # databases may not have the column at all.
+        json_col = "m.json AS msg_json" if "json" in msg_cols else "NULL AS msg_json"
+
         rows = conn.execute(
             f"""SELECT
                 m.id,
@@ -290,6 +311,7 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
                 m.source,
                 {source_col},
                 m.hasAttachments,
+                {json_col},
                 {read_col},
                 c.e164    AS conv_e164,
                 {conv_service_col},
@@ -342,6 +364,7 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
                 timestamp=datetime.fromtimestamp(ts_ms / 1000),
                 group_id=_decode_group_id(row["conv_group_id"]),
                 is_read=is_read,
+                quote_id=_quote_id(row["msg_json"]),
             ))
     finally:
         conn.close()
@@ -408,6 +431,29 @@ def _decode_group_id(raw: str | None) -> str | None:
     if raw.startswith("blob:"):
         raw = raw[len("blob:"):]
     return raw or None
+
+
+def _quote_id(msg_json: str | None) -> str | None:
+    """The sent_at of the message this one replies to, as a string, or None.
+
+    Signal Desktop keeps a reply's quote inside the message's json blob as
+    {"quote": {"id": <sent_at of the quoted message>, ...}}. `id` is the quoted
+    message's own sent_at, matching the str(sent_at) id scheme used elsewhere
+    in this module, so it joins back to another imported message's own id.
+    """
+    if not msg_json:
+        return None
+    try:
+        quote = json.loads(msg_json).get("quote")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(quote, dict):
+        return None
+    qid = quote.get("id")
+    if isinstance(qid, bool) or not isinstance(qid, (int, str)):
+        return None
+    qid = str(qid).strip()
+    return qid if qid.isdigit() else None
 
 
 def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_ms: int = 0) -> dict:

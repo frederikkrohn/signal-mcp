@@ -13,6 +13,7 @@ from signal_mcp.desktop import (
     DesktopImportError,
     _decode_group_id,
     _decrypt_key,
+    _quote_id,
     _read_conversation_names,
     _read_messages_from_plain_db,
     import_from_desktop,
@@ -153,6 +154,59 @@ def test_read_messages_timestamps(tmp_path):
     db = _make_plain_db(tmp_path)
     messages = _read_messages_from_plain_db(db)
     assert any(m.body == "Hallo" for m in messages)
+
+
+# ── _quote_id ─────────────────────────────────────────────────────────────────
+
+def test_quote_id_none_json():
+    assert _quote_id(None) is None
+
+
+def test_quote_id_no_quote_key():
+    assert _quote_id('{"body": "hi"}') is None
+
+
+def test_quote_id_invalid_json():
+    assert _quote_id("not json") is None
+
+
+def test_quote_id_extracts_sent_at():
+    assert _quote_id('{"quote": {"id": 1717243200000, "authorAci": "x"}}') == "1717243200000"
+
+
+def test_quote_id_rejects_non_numeric():
+    assert _quote_id('{"quote": {"id": "not-a-number"}}') is None
+    assert _quote_id('{"quote": {"id": true}}') is None
+    assert _quote_id('{"quote": "not-a-dict"}') is None
+
+
+def test_read_messages_sets_quote_id_from_json_column(tmp_path):
+    """A reply imported from Signal Desktop must be joinable back to the
+    message it quotes, the same way live-received replies already are."""
+    db_path = tmp_path / "quotes.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceUuid TEXT,
+        hasAttachments INTEGER, json TEXT
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', '+49222', NULL)")
+    conn.execute(
+        "INSERT INTO messages VALUES ('m1', 'c1', 'incoming', 'original', 1000, 1000, "
+        "'+49222', NULL, 0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO messages VALUES ('m2', 'c1', 'incoming', 'a reply', 2000, 2000, "
+        "'+49222', NULL, 0, '{\"quote\": {\"id\": 1000}}')"
+    )
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path)
+    by_body = {m.body: m for m in messages}
+    assert by_body["a reply"].quote_id == "1000"
+    assert by_body["original"].quote_id is None
 
 
 # ── _read_conversation_names ─────────────────────────────────────────────────
@@ -644,7 +698,8 @@ def test_decrypt_db_to_temp_success(tmp_path):
         return r
 
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
+         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "plaintext-tmp"):
         result = _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
 
     assert result.exists()
@@ -661,10 +716,61 @@ def test_decrypt_db_to_temp_sqlcipher_fails(tmp_path):
     fail_result = MagicMock()
     fail_result.returncode = 1
     fail_result.stderr = "cipher error"
+    tmp_dir = tmp_path / "plaintext-tmp"
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", return_value=fail_result):
+         patch("signal_mcp.desktop.subprocess.run", return_value=fail_result), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
         with pytest.raises(DesktopImportError, match="sqlcipher failed"):
             _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+    # A failed export must never leave the plaintext temp file behind.
+    assert list(tmp_dir.iterdir()) == []
+
+
+def test_decrypt_db_to_temp_cleans_up_on_subprocess_exception(tmp_path):
+    """A subprocess.run exception (e.g. timeout) must not leave the plaintext
+    temp file behind either — only the sqlcipher-failure paths did before."""
+    from signal_mcp.desktop import _decrypt_db_to_temp
+
+    fake_db = tmp_path / "db.sqlite"
+    fake_db.write_bytes(b"encrypted")
+    tmp_dir = tmp_path / "plaintext-tmp"
+
+    with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=TimeoutError("boom")), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
+        with pytest.raises(TimeoutError):
+            _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+    assert list(tmp_dir.iterdir()) == []
+
+
+def test_decrypt_db_to_temp_uses_a_private_directory(tmp_path):
+    """The plaintext export directory must be created 0700 — it holds a full
+    plaintext copy of the user's Signal message history."""
+    from signal_mcp.desktop import _decrypt_db_to_temp
+    import stat
+
+    fake_db = tmp_path / "db.sqlite"
+    fake_db.write_bytes(b"encrypted")
+    tmp_dir = tmp_path / "plaintext-tmp"
+
+    def fake_run(cmd, input=None, **kwargs):
+        for line in (input or "").splitlines():
+            if "ATTACH DATABASE" in line and "AS plaintext" in line:
+                start = line.index("'") + 1
+                end = line.index("'", start)
+                Path(line[start:end]).write_bytes(b"plain sqlite data")
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        return r
+
+    with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
+        result = _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+
+    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+    result.unlink(missing_ok=True)
 
 
 def test_decrypt_db_to_temp_empty_output(tmp_path):
@@ -679,7 +785,8 @@ def test_decrypt_db_to_temp_empty_output(tmp_path):
     ok_result.stderr = ""
     # Don't create the temp file → empty output condition
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", return_value=ok_result):
+         patch("signal_mcp.desktop.subprocess.run", return_value=ok_result), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "plaintext-tmp"):
         with pytest.raises(DesktopImportError, match="empty output"):
             _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
 
