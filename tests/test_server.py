@@ -1572,3 +1572,56 @@ async def test_store_stats_unread_count_consistent():
     stats = json.loads(result[0].text)
     unread_list = _store_mod.get_unread_messages(own_number=own)
     assert stats["unread_messages"] == len(unread_list) == 1
+
+
+# ── SIGNAL_MCP_READONLY ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_tools_full_when_readonly_unset(monkeypatch):
+    from signal_mcp.server import _list_tools, TOOLS
+    from mcp.types import RequestParams
+    monkeypatch.delenv("SIGNAL_MCP_READONLY", raising=False)
+    monkeypatch.setattr("signal_mcp.server._READONLY", False)
+
+    result = await _list_tools(None, RequestParams())
+    names = {t.name for t in result.tools}
+    assert len(result.tools) == len(TOOLS)
+    assert "send_message" in names
+    assert "delete_message" in names
+
+
+@pytest.mark.asyncio
+async def test_list_tools_excludes_write_tools_when_readonly(monkeypatch):
+    from signal_mcp.server import _list_tools
+    from mcp.types import RequestParams
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+
+    result = await _list_tools(None, RequestParams())
+    names = {t.name for t in result.tools}
+    assert "send_message" not in names
+    assert "delete_message" not in names
+    assert "list_contacts" in names
+    assert "get_conversation" in names
+
+
+@pytest.mark.asyncio
+async def test_call_tool_rejects_write_tool_when_readonly(monkeypatch, reset_client):
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+    spy = MagicMock()
+    async def tracked_send_message(*a, **kw):
+        spy()
+        raise AssertionError("send_message should not be called in read-only mode")
+    monkeypatch.setattr(reset_client, "send_message", tracked_send_message)
+
+    result = await call_tool("send_message", {"recipient": "+19999999999", "message": "Hi"})
+    assert "read-only mode" in result[0].text
+    spy.assert_not_called()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_call_tool_allows_read_only_tool_when_readonly(monkeypatch):
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    result = await call_tool("list_contacts", {})
+    assert "[]" in result[0].text

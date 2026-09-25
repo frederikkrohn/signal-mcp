@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from datetime import datetime
 
 from mcp.server import Server, ServerRequestContext
@@ -22,6 +23,19 @@ from . import __version__, store as _store
 app = Server("signal-mcp", version=__version__)
 
 _client: SignalClient | None = None
+
+# Tools that only read/list/search/export existing state — no side effect on the
+# Signal account, contacts, groups, messages, files, or configuration.
+_READ_ONLY_TOOLS = {
+    "list_contacts", "list_groups", "get_conversation", "search_messages",
+    "get_profile", "get_own_number", "store_stats", "get_unread",
+    "list_conversations", "get_user_status", "list_identities", "export_messages",
+    "list_sticker_packs", "list_attachments", "get_attachment", "get_sticker",
+    "list_accounts", "get_webhook", "find_contact", "list_scheduled_messages",
+    "list_devices", "get_avatar", "receive_messages", "receive_direct",
+}
+
+_READONLY = os.environ.get("SIGNAL_MCP_READONLY", "").lower() in ("1", "true", "yes")
 
 # Tools that don't need the signal-cli daemon (read from local store only)
 _DAEMON_FREE = {
@@ -1501,13 +1515,14 @@ _TOOL_NAMES = {t.name for t in TOOLS}
 
 
 async def _list_tools(ctx: ServerRequestContext, params: RequestParams) -> ListToolsResult:
+    if _READONLY:
+        return ListToolsResult(tools=[t for t in TOOLS if t.name in _READ_ONLY_TOOLS])
     return ListToolsResult(tools=TOOLS)
 
 
 async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
     name = params.name
     arguments = params.arguments or {}
-    client = get_client()  # noqa: F841 — used throughout the giant match below
 
     # Validate the tool exists and has its required parameters BEFORE touching the
     # daemon. Previously ensure_daemon() ran first, so an unknown tool name or a
@@ -1515,6 +1530,11 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
     # whenever the daemon itself couldn't start — masking the actual error.
     if name not in _TOOL_NAMES:
         return _err(f"Unknown tool: {name}")
+
+    if _READONLY and name not in _READ_ONLY_TOOLS:
+        return _err("This server is running in read-only mode (SIGNAL_MCP_READONLY).")
+
+    client = get_client()  # noqa: F841 — used throughout the giant match below
 
     # Required parameters, per tool (gives a clean error instead of KeyError)
     _REQUIRED: dict[str, list[str]] = {
