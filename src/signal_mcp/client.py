@@ -203,16 +203,19 @@ class SignalClient:
                 clear_daemon_pid()
                 await asyncio.sleep(0.5)
 
-            proc = subprocess.Popen(
-                [
-                    "signal-cli", "-u", self.account,
-                    "daemon",
-                    "--http", f"localhost:{DAEMON_PORT}",
-                    "--no-receive-stdout",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                proc = subprocess.Popen(
+                    [
+                        "signal-cli", "-u", self.account,
+                        "daemon",
+                        "--http", f"localhost:{DAEMON_PORT}",
+                        "--no-receive-stdout",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as e:
+                raise SignalError(f"could not start signal-cli daemon: {e}") from e
             save_daemon_pid(proc.pid)
 
             for _ in range(20):
