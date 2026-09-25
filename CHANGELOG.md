@@ -2,6 +2,14 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.37.1] — 2026-09-25
+
+### Fixed
+
+- **Signal Desktop import split every direct conversation into two, and dropped the recipient on outgoing messages to contacts with no stored phone number.** `store.get_conversation` matches `sender = ? OR recipient = ?` against a single identifier, but incoming messages were keyed by the contact's uuid (Signal Desktop leaves `source` NULL and fills `sourceServiceId`) while outgoing messages were keyed by the conversation's e164 — a read by either identifier returned only half the conversation. Found independently by two forks of this project (`faces-sh/signal-mcp`, `Culper-Project/signal-mcp`) while diagnosing corrupted imported history; verified against this repo's own code before fixing. Both directions of a direct-conversation message now use the same identifier — the conversation's own e164, falling back to its serviceId for a contact with no phone number on file. Group messages are unaffected.
+
+---
+
 ## [1.37.0] — 2026-09-22
 
 ### Added
