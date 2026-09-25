@@ -6,6 +6,7 @@ import respx
 import httpx
 from unittest.mock import patch
 
+import signal_mcp.client as _client_mod
 import signal_mcp.store as _store_mod
 from signal_mcp.client import SignalClient, SignalError
 from signal_mcp.config import DAEMON_URL
@@ -29,6 +30,16 @@ def reset_store(monkeypatch, tmp_path):
     if getattr(_store_mod._thread_local, "conn", None) is not None:
         _store_mod._thread_local.conn.close()
         _store_mod._thread_local.conn = None
+
+
+@pytest.fixture(autouse=True)
+def reset_caches(monkeypatch):
+    monkeypatch.setattr(_client_mod, "_contact_cache", {})
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_group_cache", {})
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", 0.0)
 
 
 @pytest.fixture
