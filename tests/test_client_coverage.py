@@ -349,9 +349,18 @@ async def test_ensure_contact_cache_ignores_desktop_group_names(client):
 @pytest.mark.asyncio
 async def test_ensure_group_cache_failure_leaves_unloaded(client):
     with patch.object(client, "list_groups", new_callable=AsyncMock,
-                      side_effect=Exception("daemon down")):
+                      side_effect=SignalError("daemon down")):
         await client._ensure_group_cache()
     assert client_mod._group_cache_loaded is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_group_cache_propagates_non_signal_error(client):
+    """A real bug (not a daemon-unavailable SignalError) must not be swallowed."""
+    with patch.object(client, "list_groups", new_callable=AsyncMock,
+                      side_effect=AttributeError("boom")):
+        with pytest.raises(AttributeError):
+            await client._ensure_group_cache()
 
 
 # ── _enrich_message with recipient and group_id ──────────────────────────────
@@ -506,8 +515,8 @@ async def test_upload_sticker_pack_string_result(client, tmp_path):
 @pytest.mark.asyncio
 async def test_list_accounts_non_list(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
-    result = await client.list_accounts()
-    assert result == []
+    with pytest.raises(SignalError, match="listAccounts"):
+        await client.list_accounts()
 
 
 # ── update_account with unrestricted_unidentified_sender ─────────────────────
@@ -920,3 +929,129 @@ async def test_ensure_daemon_second_check_inside_lock(client, monkeypatch):
 
     # Popen must NOT have been called — the inner re-check found daemon alive
     popen_mock.assert_not_called()
+
+
+# ── _rpc: per-recipient failures buried in a 200 response ───────────────────
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_rpc_raises_on_non_success_result_entry(client):
+    """A 200 response can still carry a failed per-recipient result — must raise."""
+    payload = rpc_ok({
+        "timestamp": 1234,
+        "results": [
+            {"recipientAddress": {"number": "+19999999999"}, "type": "UNREGISTERED_FAILURE"},
+        ],
+    })
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(SignalError, match="UNREGISTERED_FAILURE"):
+        await client.send_message("+19999999999", "hi")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_rpc_succeeds_when_all_results_success(client):
+    payload = rpc_ok({
+        "timestamp": 1234,
+        "results": [{"recipientAddress": {"number": "+19999999999"}, "type": "SUCCESS"}],
+    })
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=payload))
+    result = await client.send_message("+19999999999", "hi")
+    assert result.success is True
+
+
+# ── receive_direct: subprocess exit code ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_receive_direct_raises_on_nonzero_exit(client, monkeypatch):
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=(b"", b"error: not registered"))
+    proc_mock.returncode = 1
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        with pytest.raises(SignalError, match="not registered"):
+            await client.receive_direct(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_receive_direct_succeeds_on_zero_exit(client, monkeypatch):
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=(b"", b""))
+    proc_mock.returncode = 0
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        result = await client.receive_direct(timeout=1)
+    assert result == []
+
+
+# ── _ensure_contact_cache: only SignalError is swallowed ────────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_propagates_non_signal_error(client):
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      side_effect=KeyError("boom")):
+        with pytest.raises(KeyError):
+            await client._ensure_contact_cache()
+
+
+# ── list_contacts / list_groups / list_sticker_packs / get_user_status /
+#    list_accounts: unexpected RPC shape raises instead of returning empty ────
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_contacts_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listContacts"):
+        await client.list_contacts()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_groups_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listGroups"):
+        await client.list_groups()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_sticker_packs_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listStickerPacks"):
+        await client.list_sticker_packs()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_user_status_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="getUserStatus"):
+        await client.get_user_status(["+19999999999"])
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_group_raises_on_non_dict_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    with pytest.raises(SignalError, match="updateGroup"):
+        await client.create_group("Test", ["+19999999999"])
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_join_group_raises_on_non_dict_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    with pytest.raises(SignalError, match="joinGroup"):
+        await client.join_group("https://signal.group/#abc")

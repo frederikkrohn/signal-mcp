@@ -73,6 +73,27 @@ def _enhance_error(msg: str) -> str:
     return msg
 
 
+def _find_rpc_failures(obj) -> list[dict]:
+    """Recursively find non-SUCCESS entries in any 'results' list nested in obj.
+
+    signal-cli can return HTTP 200 with per-recipient failures (e.g.
+    UNREGISTERED_FAILURE, IDENTITY_FAILURE) buried in a 'results' array.
+    """
+    failures = []
+    if isinstance(obj, dict):
+        results = obj.get("results")
+        if isinstance(results, list):
+            for entry in results:
+                if isinstance(entry, dict) and entry.get("type") not in (None, "SUCCESS"):
+                    failures.append(entry)
+        for value in obj.values():
+            failures.extend(_find_rpc_failures(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            failures.extend(_find_rpc_failures(item))
+    return failures
+
+
 class _RateLimiter:
     """Token bucket: burst up to `rate` calls then refill at rate/per calls per second."""
 
@@ -309,7 +330,11 @@ class SignalClient:
         if "error" in body:
             raw = body["error"].get("message", str(body["error"]))
             raise SignalError(f"signal-cli error: {_enhance_error(raw)}")
-        return body.get("result", {})
+        result = body.get("result", {})
+        failures = _find_rpc_failures(result)
+        if failures:
+            raise SignalError(f"signal-cli reported recipient failure(s) for {method}: {failures}")
+        return result
 
     # ── Messaging ─────────────────────────────────────────────────────────────
 
@@ -612,9 +637,12 @@ class SignalClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, stderr = await proc.communicate()
         finally:
             RECEIVE_LOCK_FILE.unlink(missing_ok=True)
+
+        if proc.returncode != 0:
+            raise SignalError(f"signal-cli receive failed: {stderr.decode().strip()}")
 
         messages: list[Message] = []
         for line in stdout.decode().strip().splitlines():
@@ -759,7 +787,7 @@ class SignalClient:
                     _contact_cache[conv_id] = name
             _contact_cache_loaded = True   # only set on success
             _contact_cache_at = time.monotonic()
-        except Exception:
+        except SignalError:
             pass  # will retry on next call
 
     async def _ensure_group_cache(self) -> None:
@@ -775,7 +803,7 @@ class SignalClient:
                     _group_cache[g.id] = g.name or g.id
             _group_cache_loaded = True
             _group_cache_at = time.monotonic()
-        except Exception:
+        except SignalError:
             pass
 
     async def _ensure_caches(self) -> None:
@@ -807,8 +835,10 @@ class SignalClient:
 
     async def list_contacts(self, search: str | None = None) -> list[Contact]:
         result = await self._rpc("listContacts")
+        if not isinstance(result, list):
+            raise SignalError(f"listContacts returned unexpected result: {result!r}")
         contacts = []
-        for c in result if isinstance(result, list) else []:
+        for c in result:
             profile = c.get("profile") or {}
             contacts.append(Contact(
                 number=c.get("number") or "",
@@ -877,8 +907,10 @@ class SignalClient:
 
     async def list_groups(self) -> list[Group]:
         result = await self._rpc("listGroups")
+        if not isinstance(result, list):
+            raise SignalError(f"listGroups returned unexpected result: {result!r}")
         groups = []
-        for g in result if isinstance(result, list) else []:
+        for g in result:
             members = [
                 GroupMember(
                     uuid=m.get("uuid", ""),
@@ -912,7 +944,9 @@ class SignalClient:
         if description:
             params["description"] = description
         result = await self._rpc("updateGroup", params)
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict):
+            raise SignalError(f"updateGroup returned unexpected result: {result!r}")
+        return result
 
     async def update_group(
         self,
@@ -950,7 +984,9 @@ class SignalClient:
     async def join_group(self, uri: str) -> dict:
         """Join a group via invite link URI."""
         result = await self._rpc("joinGroup", {"uri": uri})
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict):
+            raise SignalError(f"joinGroup returned unexpected result: {result!r}")
+        return result
 
     async def list_devices(self) -> list[dict]:
         """List all linked devices on this account."""
@@ -1034,7 +1070,9 @@ class SignalClient:
     async def get_user_status(self, recipients: list[str]) -> list[dict]:
         """Check whether phone numbers are registered Signal users."""
         result = await self._rpc("getUserStatus", {"recipient": recipients})
-        return result if isinstance(result, list) else []
+        if not isinstance(result, list):
+            raise SignalError(f"getUserStatus returned unexpected result: {result!r}")
+        return result
 
     async def send_sync_request(self) -> None:
         """Request a sync of messages/contacts/groups from the primary device."""
@@ -1067,7 +1105,9 @@ class SignalClient:
     async def list_sticker_packs(self) -> list[dict]:
         """List all installed sticker packs."""
         result = await self._rpc("listStickerPacks")
-        return result if isinstance(result, list) else []
+        if not isinstance(result, list):
+            raise SignalError(f"listStickerPacks returned unexpected result: {result!r}")
+        return result
 
     async def add_sticker_pack(self, uri: str) -> dict:
         """Install a sticker pack from a signal.art URL.
@@ -1101,9 +1141,9 @@ class SignalClient:
     async def list_accounts(self) -> list[str]:
         """List all phone numbers (accounts) configured in signal-cli."""
         result = await self._rpc("listAccounts")
-        if isinstance(result, list):
-            return [entry.get("number") or entry for entry in result if entry]
-        return []
+        if not isinstance(result, list):
+            raise SignalError(f"listAccounts returned unexpected result: {result!r}")
+        return [entry.get("number") or entry for entry in result if entry]
 
     async def update_account(
         self,

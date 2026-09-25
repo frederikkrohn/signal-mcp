@@ -163,9 +163,9 @@ def get_webhook_url() -> str | None:
     if WEBHOOK_CONFIG_FILE.exists():
         try:
             data = json.loads(WEBHOOK_CONFIG_FILE.read_text())
-            return data.get("url") or None
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"Webhook config file {WEBHOOK_CONFIG_FILE} is corrupt: {e}") from e
+        return data.get("url") or None
     return None
 
 

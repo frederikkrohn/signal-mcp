@@ -769,7 +769,7 @@ async def test_contact_cache_retries_after_failure(client, monkeypatch):
     async def failing_list_contacts():
         nonlocal call_count
         call_count += 1
-        raise Exception("daemon not ready")
+        raise SignalError("daemon not ready")
 
     monkeypatch.setattr(client, "list_contacts", failing_list_contacts)
     await client._ensure_contact_cache()
@@ -1663,8 +1663,15 @@ async def test_list_conversations_resolves_group_names(client, monkeypatch):
         id="gcnv1", sender="+2", body="in group",
         timestamp=_dt(2024, 6, 1), group_id="grpABC==",
     ))
-    # Seed the group cache directly
+    # Seed the group cache directly, and mark both caches loaded (with a
+    # fresh timestamp) so list_conversations doesn't attempt a real
+    # (unmocked) RPC call.
+    import time as _time
     monkeypatch.setitem(_client_mod._group_cache, "grpABC==", "My Team")
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
     convs = await client.list_conversations()
     group_convs = [c for c in convs if c["type"] == "group"]
     assert len(group_convs) == 1
