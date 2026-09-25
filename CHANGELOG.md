@@ -2,6 +2,16 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.0] — 2026-09-25
+
+### Added
+
+- **Contact names now fall back to Signal Desktop's own conversation names** for people signal-cli's own contact list doesn't have a name for. Signal Desktop typically knows far more people by name than have been pushed into signal-cli — this data was already being captured during `import_desktop`/`sync_desktop`, just never read back. signal-cli's own name (including one set manually via `update_contact`) always wins; Desktop only fills gaps. Also fixes `_read_conversation_names` dropping every contact with no phone number on file — falls back to the conversation's serviceId. This is a manual-refresh feature: names reflect the last `import_desktop`/`sync_desktop` run.
+
+Idea credited to `faces-sh/signal-mcp`'s fork.
+
+---
+
 ## [1.37.2] — 2026-09-25
 
 ### Fixed
