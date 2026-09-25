@@ -2,6 +2,17 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.1] — 2026-09-25
+
+### Fixed
+
+- **Desktop-imported replies never got a `quote_id`**, even though live-received replies already do. Signal Desktop keeps a reply's quote in the message's json blob; now extracted the same way other optional-schema columns already are.
+- **`_decrypt_db_to_temp` leaked a full plaintext copy of Signal message history to the shared system temp directory on any decrypt failure** (wrong key, timeout, non-zero exit, empty output) — never cleaned up. Now written to a private, `0700` app-owned directory (`~/.local/share/signal-mcp/tmp`) and unlinked on every failure path.
+
+Both credited to `Culper-Project/signal-mcp`'s analysis.
+
+---
+
 ## [1.38.0] — 2026-09-25
 
 ### Added
