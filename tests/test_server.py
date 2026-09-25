@@ -8,9 +8,10 @@ import pytest
 import respx
 import httpx
 
+import signal_mcp.config as _config_mod
 import signal_mcp.store as _store_mod
 from signal_mcp.config import DAEMON_URL
-from signal_mcp.models import Message
+from signal_mcp.models import Contact, Message
 from tests.conftest import call_tool
 from signal_mcp.client import SignalClient
 
@@ -1572,3 +1573,163 @@ async def test_store_stats_unread_count_consistent():
     stats = json.loads(result[0].text)
     unread_list = _store_mod.get_unread_messages(own_number=own)
     assert stats["unread_messages"] == len(unread_list) == 1
+
+
+# ── webhook, find_contact, scheduled messages ──────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def isolate_webhook_config(monkeypatch, tmp_path):
+    """Keep webhook config tests off the real ~/.local/share/signal-mcp/webhook.json."""
+    monkeypatch.setattr(_config_mod, "WEBHOOK_CONFIG_FILE", tmp_path / "webhook.json")
+    monkeypatch.delenv("SIGNAL_MCP_WEBHOOK", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_tool_set_webhook_and_get_webhook():
+    result = await call_tool("set_webhook", {"url": "http://localhost:5678/webhook/signal"})
+    data = json.loads(result[0].text)
+    assert data["status"] == "webhook set"
+    assert data["url"] == "http://localhost:5678/webhook/signal"
+
+    result = await call_tool("get_webhook", {})
+    data = json.loads(result[0].text)
+    assert data["url"] == "http://localhost:5678/webhook/signal"
+
+
+@pytest.mark.asyncio
+async def test_tool_set_webhook_clear():
+    await call_tool("set_webhook", {"url": "http://localhost:5678/webhook/signal"})
+    result = await call_tool("set_webhook", {"url": None})
+    data = json.loads(result[0].text)
+    assert data["status"] == "webhook cleared"
+
+    result = await call_tool("get_webhook", {})
+    data = json.loads(result[0].text)
+    assert data["url"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_find_contact_missing_query():
+    result = await call_tool("find_contact", {})
+    assert result[0].text.startswith("Error:")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_find_contact_matches():
+    contacts_data = [
+        {"number": "+19999999999", "name": "Alice"},
+    ]
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(contacts_data)))
+    result = await call_tool("find_contact", {"query": "Alice"})
+    data = json.loads(result[0].text)
+    assert len(data) == 1
+    assert data[0]["number"] == "+19999999999"
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_missing_fields():
+    result = await call_tool("schedule_message", {"message": "hi"})
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_missing_recipient_and_group():
+    result = await call_tool("schedule_message", {"message": "hi", "send_at": "2999-01-01T09:00:00"})
+    assert "recipient" in result[0].text or "group_id" in result[0].text
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_at", [
+    "2999-06-01T09:00:00",
+    "2999-06-01 09:00:00",
+    "2999-06-01 09:00",
+    "2999-06-01T09:00",
+])
+async def test_tool_schedule_message_accepted_date_formats(send_at):
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": send_at, "recipient": "+19999999999",
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "scheduled"
+    assert "job_id" in data
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_invalid_format():
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "not-a-date", "recipient": "+19999999999",
+    })
+    assert result[0].text.startswith("Error:")
+    assert "Invalid send_at format" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_in_past():
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2000-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    assert result[0].text.startswith("Error:")
+    assert "must be in the future" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_list_scheduled_messages():
+    await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2999-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    result = await call_tool("list_scheduled_messages", {})
+    data = json.loads(result[0].text)
+    assert len(data) == 1
+    assert data[0]["message"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_missing_job_id():
+    result = await call_tool("cancel_scheduled_message", {})
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_success():
+    schedule_result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2999-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    job_id = json.loads(schedule_result[0].text)["job_id"]
+    result = await call_tool("cancel_scheduled_message", {"job_id": job_id})
+    data = json.loads(result[0].text)
+    assert data["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_not_found():
+    result = await call_tool("cancel_scheduled_message", {"job_id": 999999})
+    assert result[0].text.startswith("Error:")
+    assert "No pending scheduled message" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_run_scheduled_messages(reset_client):
+    async def fake_process():
+        return [{"id": 1, "status": "sent", "timestamp": 1234}]
+    reset_client.process_scheduled_messages = fake_process
+
+    result = await call_tool("run_scheduled_messages", {})
+    data = json.loads(result[0].text)
+    assert data["processed"] == 1
+    assert data["results"][0]["status"] == "sent"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_submit_rate_limit_challenge():
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
+    result = await call_tool("submit_rate_limit_challenge", {
+        "challenge": "chal-token", "captcha": "captcha-token",
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "challenge submitted"
+    req_body = json.loads(respx.calls[-1].request.content)
+    assert req_body["params"]["challenge"] == "chal-token"
+    assert req_body["params"]["captcha"] == "captcha-token"
