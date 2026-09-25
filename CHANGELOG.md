@@ -2,6 +2,12 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.3] — 2026-09-25
+
+### Fixed
+
+- **1.38.2's cache-refresh fix (narrowing `except Exception` to `except SignalError`) exposed an unwrapped `FileNotFoundError`** from `ensure_daemon`'s `subprocess.Popen` when `signal-cli` isn't on `PATH` — worked on a machine with signal-cli installed, broke CI and any environment without it. `ensure_daemon` now wraps a missing/unrunnable binary in `SignalError`. Caught by CI going red on the 1.38.2 release; verified locally by stripping `signal-cli` from `PATH`.
+
 ## [1.38.2] — 2026-09-25
 
 ### Fixed
