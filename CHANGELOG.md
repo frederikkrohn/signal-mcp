@@ -2,6 +2,17 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.37.2] — 2026-09-25
+
+### Fixed
+
+- **`import_from_desktop` swallowed a failed own-number lookup**, permanently attributing every outgoing message's sender to the literal string `"me"` instead of the real account number. Now raises `DesktopImportError` with a clear message instead of silently corrupting the import.
+- **`call_tool` started the signal-cli daemon before validating that the tool name exists or has its required arguments**, so an unknown tool or a missing argument reported "daemon failed to start" whenever the daemon itself couldn't start — masking the real, cheaper-to-diagnose problem. Validation now runs first.
+
+Both surfaced while reviewing forks of this project — see `faces-sh/signal-mcp`'s uniform-error-envelope commit for the original analysis (its broader architecture wasn't adopted here, just these two fixes).
+
+---
+
 ## [1.37.1] — 2026-09-25
 
 ### Fixed
