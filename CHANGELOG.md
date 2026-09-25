@@ -14,6 +14,23 @@ All notable changes to signal-mcp are documented here.
 
 Bugs identified via a diff against `faces-sh/signal-mcp`'s fork; fixed directly against our existing `SignalError`/`RuntimeError` types rather than adopting the fork's envelope architecture.
 
+### Added
+
+- **Read-only mode.** Set `SIGNAL_MCP_READONLY=1` to run the server with every state-mutating tool (send, edit, delete, react, group/account management, scheduling, desktop import, etc.) hidden from `list_tools` and rejected by `call_tool` if called directly. 24 read-only tools (contacts, groups, conversations, search, export, status) remain available.
+
+### Hardened
+
+- **Stale plaintext temp files are swept** at the start of every Desktop import — the only thing that can clean up after a `SIGKILL`, which no signal handler can catch.
+- **SIGTERM/SIGINT now delete the in-flight plaintext temp file** before the process exits (main-thread only, per Python's `signal` module constraints; the sweep above is the backstop for the background-thread case).
+- **A single-flight lock prevents two concurrent Desktop imports** from racing on the same local store.
+
+### Testing
+
+- `webhook.py` coverage: 39% → 100%.
+- 8 previously-untested MCP tool handlers (`set_webhook`, `get_webhook`, `find_contact`, `schedule_message`, `list_scheduled_messages`, `cancel_scheduled_message`, `run_scheduled_messages`, `submit_rate_limit_challenge`) now covered.
+- Fixed a long-standing order-dependent flaky test (`test_ensure_group_cache`) caused by unreset module-level cache state between tests.
+- Overall coverage: 88% → 92%, 664 tests passing.
+
 ---
 
 ## [1.38.1] — 2026-09-25
