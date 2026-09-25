@@ -270,6 +270,15 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
         else:
             read_col = "NULL AS readStatus"
 
+        # A contact with no phone number is still one conversation, and older
+        # Signal Desktop schemas have no serviceId column at all — detected
+        # rather than assumed, same as sourceServiceId/readStatus above.
+        conv_cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        conv_service_col = (
+            "c.serviceId AS conv_service_id" if "serviceId" in conv_cols
+            else "NULL AS conv_service_id"
+        )
+
         rows = conn.execute(
             f"""SELECT
                 m.id,
@@ -283,6 +292,7 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
                 m.hasAttachments,
                 {read_col},
                 c.e164    AS conv_e164,
+                {conv_service_col},
                 c.groupId AS conv_group_id
             FROM messages m
             LEFT JOIN conversations c ON c.id = m.conversationId
@@ -298,16 +308,23 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
             if not ts_ms:
                 continue
 
-            # Outgoing: source is NULL in Signal Desktop — use own account number,
-            # and record the DM contact as recipient so get_conversation()/
-            # list_conversations() (which match on sender OR recipient) can find it.
-            recipient = None
+            is_group = bool(row["conv_group_id"])
+            # Both halves of a direct conversation must be keyed by the SAME
+            # identifier, since store.get_conversation matches "sender = ? OR
+            # recipient = ?" against a single value. Signal Desktop leaves
+            # `source` NULL on incoming messages and fills sourceServiceId, so
+            # keying incoming by that uuid while keying outgoing by the
+            # conversation's phone number split one conversation into two —
+            # a read by either identifier returned only half the messages.
+            # Use the conversation's own e164 (falling back to its serviceId
+            # for a contact who shares no phone number) for both directions.
+            dm_identity = None if is_group else (row["conv_e164"] or row["conv_service_id"])
             if row["type"] == "outgoing":
                 sender = own_number or "me"
-                if not row["conv_group_id"]:
-                    recipient = row["conv_e164"] or None
+                recipient = dm_identity
             else:
-                sender = row["source"] or row["sourceUuid"] or row["conv_e164"] or ""
+                recipient = None
+                sender = dm_identity or row["source"] or row["sourceUuid"] or ""
 
             # Signal Desktop: readStatus=0 means read, 1=unread, NULL=unknown.
             # Default unknown/old messages to read (safer than false unread counts)

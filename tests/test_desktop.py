@@ -154,6 +154,86 @@ def test_read_messages_timestamps(tmp_path):
     assert any(m.body == "Hallo" for m in messages)
 
 
+def test_outgoing_direct_message_gets_a_recipient(tmp_path):
+    """An outgoing DM must record who it went to, or list_conversations/
+    get_conversation (which match on sender OR recipient) can never find it."""
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO messages VALUES ('m4', 'conv1', 'outgoing', 'see you then', "
+        "1717243500000, 1717243500000, NULL, NULL, 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+    messages = _read_messages_from_plain_db(db, own_number="+49111")
+    out = next(m for m in messages if m.body == "see you then")
+    assert out.recipient == "+49111"  # conv1's own e164 in the fixture
+
+
+def test_outgoing_direct_message_recipient_falls_back_to_service_id(tmp_path):
+    """A contact with no phone number stored is still one conversation."""
+    db_path = tmp_path / "no-number.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceServiceId TEXT, hasAttachments INTEGER
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', NULL, 'uuid-only', NULL)")
+    conn.execute("INSERT INTO messages VALUES ('out1', 'c1', 'outgoing', 'hi', 1000, 1000, NULL, NULL, 0)")
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path, own_number="+15550001")
+    assert messages[0].recipient == "uuid-only"
+
+
+def test_both_halves_of_a_direct_conversation_share_one_identifier(tmp_path):
+    """store.get_conversation matches sender = ? OR recipient = ? against a single
+    value. If incoming (keyed by the sender's uuid, since Signal Desktop leaves
+    `source` NULL and fills sourceServiceId) and outgoing (keyed by the
+    conversation's e164) use different identifiers, a read by either one returns
+    only half the conversation."""
+    db_path = tmp_path / "one-identity.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceServiceId TEXT, hasAttachments INTEGER
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', '+15550002', 'uuid-of-them', NULL)")
+    # source NULL + sourceServiceId set is exactly how Signal Desktop stores an incoming message.
+    conn.execute("INSERT INTO messages VALUES "
+                  "('in1', 'c1', 'incoming', 'how are you', 1000, 1000, NULL, 'uuid-of-them', 0)")
+    conn.execute("INSERT INTO messages VALUES "
+                  "('out1', 'c1', 'outgoing', 'all good', 2000, 2000, NULL, NULL, 0)")
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path, own_number="+15550001")
+    by_id = {m.id: m for m in messages}  # id scheme is str(ts_ms), matching live-received messages
+    identities = {by_id["1000"].sender, by_id["2000"].recipient}
+    assert identities == {"+15550002"}, f"both halves must name the other party the same way, got {identities}"
+
+
+def test_group_message_sender_is_still_the_member_not_the_group(tmp_path):
+    """The one-identifier fix must not leak into group messages — a group's
+    identity would otherwise name a member as "the group" instead of themselves."""
+    db = _make_plain_db(tmp_path)
+    messages = _read_messages_from_plain_db(db)
+    incoming_group = None
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO messages VALUES ('m5', 'grp1', 'incoming', 'hi all', "
+        "1717243600000, 1717243600000, NULL, 'member-uuid', 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+    messages = _read_messages_from_plain_db(db)
+    incoming_group = next(m for m in messages if m.body == "hi all")
+    assert incoming_group.sender == "member-uuid"
+
+
 # ── Integration-ish test (mocked) ───────────────────────────────────────────────
 
 @patch("signal_mcp.desktop.detect_account", return_value="+49111")
