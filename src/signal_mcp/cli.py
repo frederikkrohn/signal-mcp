@@ -15,9 +15,11 @@ from .client import _E164_RE, SignalClient, SignalError
 from .config import (
     DAEMON_PORT,
     check_signal_cli_version,
+    clear_daemon_pid,
     detect_account,
     get_account_data_dir,
     is_service_installed,
+    save_daemon_pid,
 )
 
 
@@ -579,14 +581,20 @@ def daemon(port: int):
 
     click.echo(f"Starting signal-cli daemon for {account} on port {port}…")
     click.echo("Press Ctrl+C to stop.")
+    proc = subprocess.Popen([
+        "signal-cli", "-u", account,
+        "daemon", f"--http", f"localhost:{port}",
+        "--no-receive-stdout",
+    ])
+    save_daemon_pid(proc.pid)
     try:  # pragma: no cover
-        subprocess.run([
-            "signal-cli", "-u", account,
-            "daemon", f"--http", f"localhost:{port}",
-            "--no-receive-stdout",
-        ])
+        proc.wait()
     except KeyboardInterrupt:  # pragma: no cover
+        proc.terminate()
+        proc.wait()
         click.echo("\nDaemon stopped.")
+    finally:
+        clear_daemon_pid()
 
 
 # ── stop ──────────────────────────────────────────────────────────────────────

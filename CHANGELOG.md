@@ -2,6 +2,12 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.4] — 2026-09-25
+
+### Fixed
+
+- **`signal-mcp daemon` (the CLI command the LaunchAgent runs) never wrote the daemon PID file** — only the separate auto-spawn path in `client.py` did. `signal-mcp stop` and the stale-PID cleanup in `ensure_daemon` had no way to find or kill a daemon started this way. Now writes the PID on start and clears it on exit.
+
 ## [1.38.3] — 2026-09-25
 
 ### Fixed

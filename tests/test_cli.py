@@ -716,3 +716,25 @@ def test_prune_aborts_on_no(monkeypatch, runner):
 def test_prune_rejects_zero_days(runner):
     result = runner.invoke(cli, ["prune", "--days", "0", "--yes"])
     assert result.exit_code != 0
+
+
+def test_daemon_writes_and_clears_pid_file(monkeypatch, runner, tmp_path):
+    pid_file = tmp_path / "daemon.pid"
+    monkeypatch.setattr("signal_mcp.config.DAEMON_PID_FILE", pid_file)
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 4242
+    seen_pid_while_running = {}
+
+    def fake_wait():
+        seen_pid_while_running["pid"] = pid_file.read_text().strip()
+    fake_proc.wait.side_effect = fake_wait
+
+    with patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.cli.subprocess.Popen", return_value=fake_proc) as mock_popen:
+        result = runner.invoke(cli, ["daemon"])
+
+    assert result.exit_code == 0
+    assert mock_popen.call_args[0][0][:2] == ["signal-cli", "-u"]
+    assert seen_pid_while_running["pid"] == "4242"
+    assert not pid_file.exists()
