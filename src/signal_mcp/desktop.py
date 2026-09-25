@@ -20,19 +20,22 @@ The encryptedKey is AES-128-CBC encrypted with a password from the OS keychain:
 import json
 import os
 import platform
-import subprocess
+import signal
 import sqlite3
+import subprocess
 import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
+from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes, padding
 
-from .models import Attachment, Message
-from .config import detect_account
 from . import store as _store
+from .config import detect_account
+from .models import Attachment, Message
 
 
 def _signal_dir() -> Path:
@@ -200,6 +203,27 @@ def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
 
 
 _PLAINTEXT_TMP_DIR = Path.home() / ".local" / "share" / "signal-mcp" / "tmp"
+_STALE_PLAINTEXT_MAX_AGE_SECONDS = 60 * 60
+
+DESKTOP_IMPORT_LOCK_FILE = Path.home() / ".local" / "share" / "signal-mcp" / "desktop-import.lock"
+
+
+def _sweep_stale_plaintext_files() -> None:
+    """Delete plaintext DB copies left behind by a process that was SIGKILLed.
+
+    No signal handler can intercept SIGKILL, so a hard-killed import leaves its
+    plaintext file on disk forever unless something else cleans it up. This runs
+    at the start of every import and removes anything older than the threshold.
+    """
+    if not _PLAINTEXT_TMP_DIR.exists():
+        return
+    cutoff = time.time() - _STALE_PLAINTEXT_MAX_AGE_SECONDS
+    for entry in _PLAINTEXT_TMP_DIR.iterdir():
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
@@ -214,6 +238,7 @@ def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
     source = db_path or SIGNAL_DB
     _PLAINTEXT_TMP_DIR.mkdir(parents=True, exist_ok=True)
     _PLAINTEXT_TMP_DIR.chmod(0o700)
+    _sweep_stale_plaintext_files()
     fd, tmp_str = tempfile.mkstemp(suffix=".db", dir=str(_PLAINTEXT_TMP_DIR))
     os.close(fd)
     tmp = Path(tmp_str)
@@ -456,6 +481,23 @@ def _quote_id(msg_json: str | None) -> str | None:
     return qid if qid.isdigit() else None
 
 
+_active_plain_db: Path | None = None
+
+
+def _handle_termination_signal(signum, frame) -> None:
+    """Delete the in-flight plaintext DB copy, then resume default signal behavior.
+
+    Registered only for the window during which import_from_desktop has a
+    plaintext file on disk. SIGKILL can't be caught (that's what the stale-file
+    sweep is for) — this covers SIGTERM (e.g. launchd stopping the process) and
+    SIGINT (Ctrl+C).
+    """
+    if _active_plain_db is not None:
+        _active_plain_db.unlink(missing_ok=True)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
 def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_ms: int = 0) -> dict:
     """
     Full import pipeline: decrypt DB → parse → store.
@@ -482,6 +524,23 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
     if not config_path.exists():
         raise DesktopImportError(f"Signal Desktop config not found at {config_path}")
 
+    if DESKTOP_IMPORT_LOCK_FILE.exists():
+        raise DesktopImportError(
+            "A Signal Desktop import is already in progress "
+            f"(lock file: {DESKTOP_IMPORT_LOCK_FILE})"
+        )
+    DESKTOP_IMPORT_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP_IMPORT_LOCK_FILE.write_text(str(os.getpid()))
+
+    try:
+        return _run_desktop_import(db_path, config_path, progress_cb, since_ms)
+    finally:
+        DESKTOP_IMPORT_LOCK_FILE.unlink(missing_ok=True)
+
+
+def _run_desktop_import(db_path: Path, config_path: Path, progress_cb, since_ms: int) -> dict:
+    global _active_plain_db
+
     # 1. Read encrypted key from config
     config = json.loads(config_path.read_text())
     encrypted_key_hex = config.get("encryptedKey")
@@ -505,8 +564,14 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
 
     # 3. Export encrypted DB to plain SQLite temp file
     plain_db = None
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    prev_sigterm = prev_sigint = None
     try:
         plain_db = _decrypt_db_to_temp(db_key_hex, db_path)
+        _active_plain_db = plain_db
+        if is_main_thread:
+            prev_sigterm = signal.signal(signal.SIGTERM, _handle_termination_signal)
+            prev_sigint = signal.signal(signal.SIGINT, _handle_termination_signal)
 
         if progress_cb:
             progress_cb("Importing messages…")
@@ -553,6 +618,10 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
             "source": str(db_path.parent.parent),
         }
     finally:
+        if is_main_thread and prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, prev_sigterm)
+            signal.signal(signal.SIGINT, prev_sigint)
+        _active_plain_db = None
         if plain_db is not None:
             plain_db.unlink(missing_ok=True)
 
