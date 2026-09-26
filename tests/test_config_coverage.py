@@ -205,3 +205,13 @@ def test_clear_daemon_pid_safe_when_absent(monkeypatch, tmp_path):
     pid_file = tmp_path / "no_such_file.pid"
     monkeypatch.setattr(config_mod, "DAEMON_PID_FILE", pid_file)
     clear_daemon_pid()  # should not raise
+
+
+def test_get_webhook_url_raises_on_corrupt_config(monkeypatch, tmp_path):
+    """A corrupt webhook.json must raise, not be indistinguishable from 'no webhook'."""
+    webhook_file = tmp_path / "webhook.json"
+    webhook_file.write_text("{not valid json")
+    monkeypatch.setattr(config_mod, "WEBHOOK_CONFIG_FILE", webhook_file)
+    monkeypatch.delenv("SIGNAL_MCP_WEBHOOK", raising=False)
+    with pytest.raises(RuntimeError, match="corrupt"):
+        config_mod.get_webhook_url()

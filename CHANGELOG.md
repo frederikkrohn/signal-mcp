@@ -2,6 +2,117 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.4] — 2026-09-25
+
+### Fixed
+
+- **`signal-mcp daemon` (the CLI command the LaunchAgent runs) never wrote the daemon PID file** — only the separate auto-spawn path in `client.py` did. `signal-mcp stop` and the stale-PID cleanup in `ensure_daemon` had no way to find or kill a daemon started this way. Now writes the PID on start and clears it on exit.
+
+## [1.38.3] — 2026-09-25
+
+### Fixed
+
+- **1.38.2's cache-refresh fix (narrowing `except Exception` to `except SignalError`) exposed an unwrapped `FileNotFoundError`** from `ensure_daemon`'s `subprocess.Popen` when `signal-cli` isn't on `PATH` — worked on a machine with signal-cli installed, broke CI and any environment without it. `ensure_daemon` now wraps a missing/unrunnable binary in `SignalError`. Caught by CI going red on the 1.38.2 release; verified locally by stripping `signal-cli` from `PATH`.
+
+## [1.38.2] — 2026-09-25
+
+### Fixed
+
+- **A 200 response from signal-cli's daemon can still carry per-recipient send failures** (e.g. `UNREGISTERED_FAILURE`, `IDENTITY_FAILURE`) nested in a `results` array — previously returned as if the send succeeded. `_rpc` now raises `SignalError` when it finds one.
+- **`receive_direct` never checked the signal-cli subprocess's exit code**, so a failed `receive` silently returned an empty/partial message list instead of raising.
+- **`_ensure_contact_cache`/`_ensure_group_cache` caught bare `Exception`**, meant to tolerate "daemon not up yet" but actually swallowing any bug in the cache-refresh path. Narrowed to `SignalError` so real bugs propagate instead of silently leaving the cache permanently unpopulated.
+- **Several RPC call sites** (`list_contacts`, `list_groups`, `list_sticker_packs`, `get_user_status`, `list_accounts`, `create_group`, `join_group`) **silently substituted an empty list/dict when signal-cli returned an unexpected shape**, which read to the caller as "you have no contacts/groups" instead of an error. Now raise `SignalError` naming the RPC method.
+- **`get_webhook_url` returned `None` for a corrupt/unreadable `webhook.json`**, indistinguishable from "no webhook configured". Now raises `RuntimeError`.
+
+Bugs identified via a diff against `faces-sh/signal-mcp`'s fork; fixed directly against our existing `SignalError`/`RuntimeError` types rather than adopting the fork's envelope architecture.
+
+### Added
+
+- **Read-only mode.** Set `SIGNAL_MCP_READONLY=1` to run the server with every state-mutating tool (send, edit, delete, react, group/account management, scheduling, desktop import, etc.) hidden from `list_tools` and rejected by `call_tool` if called directly. 24 read-only tools (contacts, groups, conversations, search, export, status) remain available.
+
+### Hardened
+
+- **Stale plaintext temp files are swept** at the start of every Desktop import — the only thing that can clean up after a `SIGKILL`, which no signal handler can catch.
+- **SIGTERM/SIGINT now delete the in-flight plaintext temp file** before the process exits (main-thread only, per Python's `signal` module constraints; the sweep above is the backstop for the background-thread case).
+- **A single-flight lock prevents two concurrent Desktop imports** from racing on the same local store.
+
+### Testing
+
+- `webhook.py` coverage: 39% → 100%.
+- 8 previously-untested MCP tool handlers (`set_webhook`, `get_webhook`, `find_contact`, `schedule_message`, `list_scheduled_messages`, `cancel_scheduled_message`, `run_scheduled_messages`, `submit_rate_limit_challenge`) now covered.
+- Fixed a long-standing order-dependent flaky test (`test_ensure_group_cache`) caused by unreset module-level cache state between tests.
+- Overall coverage: 88% → 92%, 664 tests passing.
+
+---
+
+## [1.38.1] — 2026-09-25
+
+### Fixed
+
+- **Desktop-imported replies never got a `quote_id`**, even though live-received replies already do. Signal Desktop keeps a reply's quote in the message's json blob; now extracted the same way other optional-schema columns already are.
+- **`_decrypt_db_to_temp` leaked a full plaintext copy of Signal message history to the shared system temp directory on any decrypt failure** (wrong key, timeout, non-zero exit, empty output) — never cleaned up. Now written to a private, `0700` app-owned directory (`~/.local/share/signal-mcp/tmp`) and unlinked on every failure path.
+
+Both credited to `Culper-Project/signal-mcp`'s analysis.
+
+---
+
+## [1.38.0] — 2026-09-25
+
+### Added
+
+- **Contact names now fall back to Signal Desktop's own conversation names** for people signal-cli's own contact list doesn't have a name for. Signal Desktop typically knows far more people by name than have been pushed into signal-cli — this data was already being captured during `import_desktop`/`sync_desktop`, just never read back. signal-cli's own name (including one set manually via `update_contact`) always wins; Desktop only fills gaps. Also fixes `_read_conversation_names` dropping every contact with no phone number on file — falls back to the conversation's serviceId. This is a manual-refresh feature: names reflect the last `import_desktop`/`sync_desktop` run.
+
+Idea credited to `faces-sh/signal-mcp`'s fork.
+
+---
+
+## [1.37.2] — 2026-09-25
+
+### Fixed
+
+- **`import_from_desktop` swallowed a failed own-number lookup**, permanently attributing every outgoing message's sender to the literal string `"me"` instead of the real account number. Now raises `DesktopImportError` with a clear message instead of silently corrupting the import.
+- **`call_tool` started the signal-cli daemon before validating that the tool name exists or has its required arguments**, so an unknown tool or a missing argument reported "daemon failed to start" whenever the daemon itself couldn't start — masking the real, cheaper-to-diagnose problem. Validation now runs first.
+
+Both surfaced while reviewing forks of this project — see `faces-sh/signal-mcp`'s uniform-error-envelope commit for the original analysis (its broader architecture wasn't adopted here, just these two fixes).
+
+---
+
+## [1.37.1] — 2026-09-25
+
+### Fixed
+
+- **Signal Desktop import split every direct conversation into two, and dropped the recipient on outgoing messages to contacts with no stored phone number.** `store.get_conversation` matches `sender = ? OR recipient = ?` against a single identifier, but incoming messages were keyed by the contact's uuid (Signal Desktop leaves `source` NULL and fills `sourceServiceId`) while outgoing messages were keyed by the conversation's e164 — a read by either identifier returned only half the conversation. Found independently by two forks of this project (`faces-sh/signal-mcp`, `Culper-Project/signal-mcp`) while diagnosing corrupted imported history; verified against this repo's own code before fixing. Both directions of a direct-conversation message now use the same identifier — the conversation's own e164, falling back to its serviceId for a contact with no phone number on file. Group messages are unaffected.
+
+---
+
+## [1.37.0] — 2026-09-22
+
+### Added
+
+- **`signal-mcp doctor`** — an onboarding smoke test that catches, in one run, the class of setup failures this project has hit in practice: signal-cli missing or too old, no account detected, daemon not running, `listDevices`/`receive` round-trips actually working (not just the port being open), and stale entries in signal-cli's `msg-cache` that can silently kill the receive thread on daemon startup. When the account has multiple linked devices, it also explains that only device 1 is primary and several write tools (`update_configuration`, `block_contact`, `set_pin`, `add_device`, ...) fail on any other device — signal-cli's JSON-RPC doesn't expose which device *this* instance is, so it can't check that automatically. Skips the direct receive probe (which would otherwise always fail) when the background watch service is installed and already holds signal-cli's receive lock. Exits non-zero if any check fails.
+
+---
+
+## [1.36.2] — 2026-09-21
+
+### Changed
+
+- **README:** `sendStory` (signal-cli 0.14.6) and `terminateGroup` (0.14.8) are now listed under "Not covered" as consciously not added — both are feasible, but stories have no use case yet and terminating a group is irreversible for every member. The section intro no longer claims everything listed there is infeasible. No code changes.
+
+---
+
+## [1.36.1] — 2026-09-21
+
+### Fixed
+
+- **`Dockerfile` could never build** — the signal-cli download step extracted `signal-cli-<ver>-Linux-native/bin/signal-cli`, but the `Linux-native` tarball contains only a single top-level `signal-cli` executable, so `tar` failed with "Not found in archive" (reproduced against the real 0.14.3 tarball). Now extracts `signal-cli` directly. Verified the extraction against the 0.14.8 tarball (x86-64 ELF); the Docker image itself was not built (no Docker daemon available). The native binary is x86-64 only.
+
+### Changed
+
+- **Bundled signal-cli bumped 0.14.3 → 0.14.8.** signal-cli's README notes that Signal's official clients expire after three months, after which the server can make incompatible changes; 0.14.3 (April) was past that.
+
+---
+
 ## [1.36.0] — 2026-09-04
 
 ### Fixed

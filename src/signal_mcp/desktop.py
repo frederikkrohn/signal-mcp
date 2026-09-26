@@ -20,19 +20,22 @@ The encryptedKey is AES-128-CBC encrypted with a password from the OS keychain:
 import json
 import os
 import platform
-import subprocess
+import signal
 import sqlite3
+import subprocess
 import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
+from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes, padding
 
-from .models import Attachment, Message
-from .config import detect_account
 from . import store as _store
+from .config import detect_account
+from .models import Attachment, Message
 
 
 def _signal_dir() -> Path:
@@ -199,11 +202,44 @@ def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
     return db_key_bytes.hex()
 
 
+_PLAINTEXT_TMP_DIR = Path.home() / ".local" / "share" / "signal-mcp" / "tmp"
+_STALE_PLAINTEXT_MAX_AGE_SECONDS = 60 * 60
+
+DESKTOP_IMPORT_LOCK_FILE = Path.home() / ".local" / "share" / "signal-mcp" / "desktop-import.lock"
+
+
+def _sweep_stale_plaintext_files() -> None:
+    """Delete plaintext DB copies left behind by a process that was SIGKILLed.
+
+    No signal handler can intercept SIGKILL, so a hard-killed import leaves its
+    plaintext file on disk forever unless something else cleans it up. This runs
+    at the start of every import and removes anything older than the threshold.
+    """
+    if not _PLAINTEXT_TMP_DIR.exists():
+        return
+    cutoff = time.time() - _STALE_PLAINTEXT_MAX_AGE_SECONDS
+    for entry in _PLAINTEXT_TMP_DIR.iterdir():
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
-    """Use sqlcipher CLI to export the encrypted DB to a plain SQLite file."""
+    """Use sqlcipher CLI to export the encrypted DB to a plain SQLite file.
+
+    The export is a full plaintext copy of the user's Signal message history,
+    so it goes in a private (0700), app-owned directory rather than the shared
+    system temp dir, and is unlinked on every failure path — a leaked copy
+    left behind on a decrypt failure would otherwise sit there indefinitely.
+    """
     sqlcipher = _find_sqlcipher()
     source = db_path or SIGNAL_DB
-    fd, tmp_str = tempfile.mkstemp(suffix=".db")
+    _PLAINTEXT_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    _PLAINTEXT_TMP_DIR.chmod(0o700)
+    _sweep_stale_plaintext_files()
+    fd, tmp_str = tempfile.mkstemp(suffix=".db", dir=str(_PLAINTEXT_TMP_DIR))
     os.close(fd)
     tmp = Path(tmp_str)
 
@@ -219,13 +255,19 @@ def _decrypt_db_to_temp(db_key_hex: str, db_path: Path | None = None) -> Path:
         f".quit\n"
     )
 
-    result = subprocess.run(
-        [sqlcipher, str(source)],
-        input=script, capture_output=True, text=True, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [sqlcipher, str(source)],
+            input=script, capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     if result.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise DesktopImportError(f"sqlcipher failed: {result.stderr.strip()}")
     if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
         raise DesktopImportError("sqlcipher produced empty output — wrong key?")
 
     return tmp
@@ -270,6 +312,19 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
         else:
             read_col = "NULL AS readStatus"
 
+        # A contact with no phone number is still one conversation, and older
+        # Signal Desktop schemas have no serviceId column at all — detected
+        # rather than assumed, same as sourceServiceId/readStatus above.
+        conv_cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        conv_service_col = (
+            "c.serviceId AS conv_service_id" if "serviceId" in conv_cols
+            else "NULL AS conv_service_id"
+        )
+
+        # A reply's quote lives in the message's json blob; older or synthetic
+        # databases may not have the column at all.
+        json_col = "m.json AS msg_json" if "json" in msg_cols else "NULL AS msg_json"
+
         rows = conn.execute(
             f"""SELECT
                 m.id,
@@ -281,8 +336,10 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
                 m.source,
                 {source_col},
                 m.hasAttachments,
+                {json_col},
                 {read_col},
                 c.e164    AS conv_e164,
+                {conv_service_col},
                 c.groupId AS conv_group_id
             FROM messages m
             LEFT JOIN conversations c ON c.id = m.conversationId
@@ -298,16 +355,23 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
             if not ts_ms:
                 continue
 
-            # Outgoing: source is NULL in Signal Desktop — use own account number,
-            # and record the DM contact as recipient so get_conversation()/
-            # list_conversations() (which match on sender OR recipient) can find it.
-            recipient = None
+            is_group = bool(row["conv_group_id"])
+            # Both halves of a direct conversation must be keyed by the SAME
+            # identifier, since store.get_conversation matches "sender = ? OR
+            # recipient = ?" against a single value. Signal Desktop leaves
+            # `source` NULL on incoming messages and fills sourceServiceId, so
+            # keying incoming by that uuid while keying outgoing by the
+            # conversation's phone number split one conversation into two —
+            # a read by either identifier returned only half the messages.
+            # Use the conversation's own e164 (falling back to its serviceId
+            # for a contact who shares no phone number) for both directions.
+            dm_identity = None if is_group else (row["conv_e164"] or row["conv_service_id"])
             if row["type"] == "outgoing":
                 sender = own_number or "me"
-                if not row["conv_group_id"]:
-                    recipient = row["conv_e164"] or None
+                recipient = dm_identity
             else:
-                sender = row["source"] or row["sourceUuid"] or row["conv_e164"] or ""
+                recipient = None
+                sender = dm_identity or row["source"] or row["sourceUuid"] or ""
 
             # Signal Desktop: readStatus=0 means read, 1=unread, NULL=unknown.
             # Default unknown/old messages to read (safer than false unread counts)
@@ -325,6 +389,7 @@ def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms:
                 timestamp=datetime.fromtimestamp(ts_ms / 1000),
                 group_id=_decode_group_id(row["conv_group_id"]),
                 is_read=is_read,
+                quote_id=_quote_id(row["msg_json"]),
             ))
     finally:
         conn.close()
@@ -351,6 +416,9 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
         if not name_expr_parts:
             return []
         name_expr = f"COALESCE({', '.join(f'NULLIF({p}, \"\")' for p in name_expr_parts)})"
+        # A contact with no phone number stored is still someone worth naming —
+        # older schemas have no serviceId column at all, so detect rather than assume.
+        service_col = "c.serviceId" if "serviceId" in conv_cols else "NULL"
 
         rows = conn.execute(
             f"""SELECT
@@ -358,6 +426,7 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
                 c.type,
                 c.groupId,
                 c.e164,
+                {service_col} AS service_id,
                 {name_expr} AS display_name
             FROM conversations c
             WHERE display_name IS NOT NULL AND display_name != ''"""
@@ -371,6 +440,8 @@ def _read_conversation_names(plain_db: Path) -> list[tuple[str, str, str]]:
                 result.append((group_id, row["display_name"], "group"))
             elif row["e164"]:
                 result.append((row["e164"], row["display_name"], "direct"))
+            elif row["service_id"]:
+                result.append((row["service_id"], row["display_name"], "direct"))
         return result
     finally:
         conn.close()
@@ -385,6 +456,46 @@ def _decode_group_id(raw: str | None) -> str | None:
     if raw.startswith("blob:"):
         raw = raw[len("blob:"):]
     return raw or None
+
+
+def _quote_id(msg_json: str | None) -> str | None:
+    """The sent_at of the message this one replies to, as a string, or None.
+
+    Signal Desktop keeps a reply's quote inside the message's json blob as
+    {"quote": {"id": <sent_at of the quoted message>, ...}}. `id` is the quoted
+    message's own sent_at, matching the str(sent_at) id scheme used elsewhere
+    in this module, so it joins back to another imported message's own id.
+    """
+    if not msg_json:
+        return None
+    try:
+        quote = json.loads(msg_json).get("quote")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(quote, dict):
+        return None
+    qid = quote.get("id")
+    if isinstance(qid, bool) or not isinstance(qid, (int, str)):
+        return None
+    qid = str(qid).strip()
+    return qid if qid.isdigit() else None
+
+
+_active_plain_db: Path | None = None
+
+
+def _handle_termination_signal(signum, frame) -> None:
+    """Delete the in-flight plaintext DB copy, then resume default signal behavior.
+
+    Registered only for the window during which import_from_desktop has a
+    plaintext file on disk. SIGKILL can't be caught (that's what the stale-file
+    sweep is for) — this covers SIGTERM (e.g. launchd stopping the process) and
+    SIGINT (Ctrl+C).
+    """
+    if _active_plain_db is not None:
+        _active_plain_db.unlink(missing_ok=True)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 
 def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_ms: int = 0) -> dict:
@@ -413,6 +524,23 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
     if not config_path.exists():
         raise DesktopImportError(f"Signal Desktop config not found at {config_path}")
 
+    if DESKTOP_IMPORT_LOCK_FILE.exists():
+        raise DesktopImportError(
+            "A Signal Desktop import is already in progress "
+            f"(lock file: {DESKTOP_IMPORT_LOCK_FILE})"
+        )
+    DESKTOP_IMPORT_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP_IMPORT_LOCK_FILE.write_text(str(os.getpid()))
+
+    try:
+        return _run_desktop_import(db_path, config_path, progress_cb, since_ms)
+    finally:
+        DESKTOP_IMPORT_LOCK_FILE.unlink(missing_ok=True)
+
+
+def _run_desktop_import(db_path: Path, config_path: Path, progress_cb, since_ms: int) -> dict:
+    global _active_plain_db
+
     # 1. Read encrypted key from config
     config = json.loads(config_path.read_text())
     encrypted_key_hex = config.get("encryptedKey")
@@ -436,17 +564,26 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
 
     # 3. Export encrypted DB to plain SQLite temp file
     plain_db = None
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    prev_sigterm = prev_sigint = None
     try:
         plain_db = _decrypt_db_to_temp(db_key_hex, db_path)
+        _active_plain_db = plain_db
+        if is_main_thread:
+            prev_sigterm = signal.signal(signal.SIGTERM, _handle_termination_signal)
+            prev_sigint = signal.signal(signal.SIGINT, _handle_termination_signal)
 
         if progress_cb:
             progress_cb("Importing messages…")
 
-        # 4. Parse messages — resolve own number for outgoing sender attribution
+        # 4. Parse messages — resolve own number for outgoing sender attribution.
+        # A silent fallback to "" here would make every outgoing message's sender
+        # fall back to the literal string "me" (see _read_messages_from_plain_db),
+        # permanently misattributing every message the user ever sent.
         try:
             own_number = detect_account()
-        except Exception:
-            own_number = ""
+        except Exception as e:
+            raise DesktopImportError(f"Could not detect your Signal account: {e}") from e
         messages = _read_messages_from_plain_db(plain_db, own_number=own_number, since_ms=since_ms)
         total = len(messages)
         imported = 0
@@ -481,6 +618,10 @@ def import_from_desktop(progress_cb=None, signal_dir: Path | None = None, since_
             "source": str(db_path.parent.parent),
         }
     finally:
+        if is_main_thread and prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, prev_sigterm)
+            signal.signal(signal.SIGINT, prev_sigint)
+        _active_plain_db = None
         if plain_db is not None:
             plain_db.unlink(missing_ok=True)
 

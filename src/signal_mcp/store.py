@@ -633,11 +633,19 @@ def save_conversation(conv_id: str, name: str, conv_type: str = "direct") -> Non
         )
 
 
-def get_conversation_names() -> dict[str, str]:
-    """Return {conversation_id: display_name} for all known conversations."""
+def get_conversation_names(conv_type: str | None = None) -> dict[str, str]:
+    """Return {conversation_id: display_name} for known conversations.
+
+    conv_type: filter to 'direct' or 'group'; None returns both.
+    """
     init_db()
     with _db() as conn:
-        rows = conn.execute("SELECT id, name FROM conversations").fetchall()
+        if conv_type:
+            rows = conn.execute(
+                "SELECT id, name FROM conversations WHERE type = ?", (conv_type,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT id, name FROM conversations").fetchall()
         return {r["id"]: r["name"] for r in rows}
 
 

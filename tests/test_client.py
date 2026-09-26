@@ -6,6 +6,7 @@ import respx
 import httpx
 from unittest.mock import patch
 
+import signal_mcp.client as _client_mod
 import signal_mcp.store as _store_mod
 from signal_mcp.client import SignalClient, SignalError
 from signal_mcp.config import DAEMON_URL
@@ -29,6 +30,16 @@ def reset_store(monkeypatch, tmp_path):
     if getattr(_store_mod._thread_local, "conn", None) is not None:
         _store_mod._thread_local.conn.close()
         _store_mod._thread_local.conn = None
+
+
+@pytest.fixture(autouse=True)
+def reset_caches(monkeypatch):
+    monkeypatch.setattr(_client_mod, "_contact_cache", {})
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_group_cache", {})
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", 0.0)
 
 
 @pytest.fixture
@@ -769,7 +780,7 @@ async def test_contact_cache_retries_after_failure(client, monkeypatch):
     async def failing_list_contacts():
         nonlocal call_count
         call_count += 1
-        raise Exception("daemon not ready")
+        raise SignalError("daemon not ready")
 
     monkeypatch.setattr(client, "list_contacts", failing_list_contacts)
     await client._ensure_contact_cache()
@@ -1663,8 +1674,15 @@ async def test_list_conversations_resolves_group_names(client, monkeypatch):
         id="gcnv1", sender="+2", body="in group",
         timestamp=_dt(2024, 6, 1), group_id="grpABC==",
     ))
-    # Seed the group cache directly
+    # Seed the group cache directly, and mark both caches loaded (with a
+    # fresh timestamp) so list_conversations doesn't attempt a real
+    # (unmocked) RPC call.
+    import time as _time
     monkeypatch.setitem(_client_mod._group_cache, "grpABC==", "My Team")
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
     convs = await client.list_conversations()
     group_convs = [c for c in convs if c["type"] == "group"]
     assert len(group_convs) == 1

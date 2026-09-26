@@ -107,6 +107,18 @@ def check_signal_cli_version() -> None:
         )
 
 
+def get_account_data_dir(account: str) -> Path | None:
+    """Return signal-cli's per-account data directory (contains msg-cache), or None."""
+    try:
+        data = json.loads(_ACCOUNTS_JSON.read_text())
+    except Exception:
+        return None
+    for acc in data.get("accounts", []):
+        if acc.get("number") == account:
+            return _ACCOUNTS_JSON.parent / f"{acc['path']}.d"
+    return None
+
+
 def ensure_attachment_dir() -> Path:
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
     return ATTACHMENT_DIR
@@ -151,9 +163,9 @@ def get_webhook_url() -> str | None:
     if WEBHOOK_CONFIG_FILE.exists():
         try:
             data = json.loads(WEBHOOK_CONFIG_FILE.read_text())
-            return data.get("url") or None
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"Webhook config file {WEBHOOK_CONFIG_FILE} is corrupt: {e}") from e
+        return data.get("url") or None
     return None
 
 
