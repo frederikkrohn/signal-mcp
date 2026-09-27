@@ -20,6 +20,7 @@ The encryptedKey is AES-128-CBC encrypted with a password from the OS keychain:
 import json
 import os
 import platform
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -79,28 +80,8 @@ def _get_keychain_password() -> bytes:
         )
 
     elif system == "Linux":
-        # Try secret-tool (GNOME Keyring / libsecret)
-        for label in ("Signal Safe Storage", "Electron Safe Storage"):
-            try:
-                result = subprocess.run(
-                    ["secret-tool", "lookup", "application", "Signal"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip().encode()
-            except FileNotFoundError:
-                pass
-            try:
-                result = subprocess.run(
-                    ["secret-tool", "lookup", "label", label],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip().encode()
-            except FileNotFoundError:
-                break
         # Signal Desktop on Linux falls back to hardcoded password when no keyring is available
-        return b"peanuts"
+        return _linux_keyring_password() or b"peanuts"
 
     elif system == "Windows":
         # On Windows, Electron's safeStorage uses DPAPI to encrypt the key directly.
@@ -114,6 +95,53 @@ def _get_keychain_password() -> bytes:
         raise DesktopImportError(
             f"Platform '{system}' is not supported for automatic keychain access."
         )
+
+
+def _linux_keyring_password() -> bytes | None:
+    """Look up the Signal Safe Storage password via secret-tool (GNOME Keyring / libsecret).
+
+    Returns None when secret-tool is not installed or has no matching entry.
+    """
+    for label in ("Signal Safe Storage", "Electron Safe Storage"):
+        try:
+            result = subprocess.run(
+                ["secret-tool", "lookup", "application", "Signal"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().encode()
+        except FileNotFoundError:
+            pass
+        try:
+            result = subprocess.run(
+                ["secret-tool", "lookup", "label", label],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().encode()
+        except FileNotFoundError:
+            break
+    return None
+
+
+def _require_linux_keyring_password() -> bytes:
+    """Return the keyring password, or explain what is missing.
+
+    Used for v11 keys, which are always encrypted with a keyring password — the
+    hardcoded "peanuts" fallback can never decrypt them.
+    """
+    password = _linux_keyring_password()
+    if password is not None:
+        return password
+    if shutil.which("secret-tool") is None:
+        raise DesktopImportError(
+            "Signal Desktop's key is protected by your keyring, but secret-tool is not installed.\n"
+            "Install it (Debian/Ubuntu: sudo apt install libsecret-tools) and try again."
+        )
+    raise DesktopImportError(
+        "Signal Desktop's key is protected by your keyring, but secret-tool found no Signal entry.\n"
+        "Make sure the keyring is unlocked and that you are the user who runs Signal Desktop."
+    )
 
 
 def _decrypt_dpapi_key(encrypted_hex: str) -> str:
@@ -158,7 +186,10 @@ def _get_db_key_hex(encrypted_hex: str) -> str:
     """Return the raw SQLCipher DB key hex, handling all platforms."""
     if platform.system() == "Windows":
         return _decrypt_dpapi_key(encrypted_hex)
-    password = _get_keychain_password()
+    if platform.system() == "Linux" and encrypted_hex[:6].lower() == b"v11".hex():
+        password = _require_linux_keyring_password()
+    else:
+        password = _get_keychain_password()
     return _decrypt_key(encrypted_hex, password)
 
 
@@ -284,9 +315,14 @@ def _find_sqlcipher() -> str:
     result = subprocess.run(["which", "sqlcipher"], capture_output=True, text=True)
     if result.returncode == 0:
         return result.stdout.strip()
-    raise DesktopImportError(
-        "sqlcipher not found. Install it: brew install sqlcipher"
-    )
+    system = platform.system()
+    if system == "Darwin":
+        hint = "Install it: brew install sqlcipher"
+    elif system == "Linux":
+        hint = "Install it: sudo apt install sqlcipher (Debian/Ubuntu) or your distribution's sqlcipher package"
+    else:
+        hint = "Install the sqlcipher command-line tool and put it on your PATH"
+    raise DesktopImportError(f"sqlcipher not found. {hint}")
 
 
 def _read_messages_from_plain_db(plain_db: Path, own_number: str = "", since_ms: int = 0) -> list[Message]:
