@@ -2,6 +2,12 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`import-desktop` / `sync-desktop` failed on Linux with `Unknown encryptedKey format (prefix=b'v11')`** whenever Signal Desktop stores its key through a keyring (libsecret / KWallet). `_decrypt_key` only handled the macOS variant of Chromium's format: prefix `v10` and 1003 PBKDF2 iterations. Linux uses `v11` for keyring-backed keys and a single iteration, so the `v10` / `peanuts` fallback was affected too. Both prefixes are accepted now and the iteration count follows the platform. (#8)
+
 ## [1.38.4] — 2026-09-25
 
 ### Fixed

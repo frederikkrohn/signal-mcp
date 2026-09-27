@@ -48,6 +48,46 @@ def test_decrypt_key_unknown_format():
         _decrypt_key(bad_hex, b"password")
 
 
+def _encrypt_key_like_chromium(db_key_hex: str, password: bytes, prefix: bytes, iterations: int) -> str:
+    """Build an encryptedKey the way Chromium's OSCrypt does (test helper)."""
+    from cryptography.hazmat.primitives import hashes, padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA1(), length=16, salt=b"saltysalt", iterations=iterations)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(db_key_hex.encode()) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(kdf.derive(password)), modes.CBC(b"\x20" * 16)).encryptor()
+    return (prefix + encryptor.update(padded) + encryptor.finalize()).hex()
+
+
+@pytest.mark.parametrize(
+    "system, prefix, iterations, password",
+    [
+        ("Darwin", b"v10", 1003, b"keychain-password"),
+        ("Linux", b"v11", 1, b"keyring-password"),  # libsecret / KWallet
+        ("Linux", b"v10", 1, b"peanuts"),           # no keyring available
+    ],
+)
+def test_decrypt_key_roundtrip_per_platform(system, prefix, iterations, password):
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, password, prefix, iterations)
+    with patch("signal_mcp.desktop.platform.system", return_value=system):
+        assert _decrypt_key(encrypted, password) == db_key
+
+
+def test_decrypt_key_linux_does_not_use_macos_iterations():
+    """A key encrypted with macOS parameters must not decrypt to the DB key on Linux."""
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, b"pw", b"v11", 1003)
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"):
+        try:
+            result = _decrypt_key(encrypted, b"pw")
+        except ValueError:
+            return  # wrong AES key → invalid padding
+    assert result != db_key
+
+
 # ── DB parsing test ─────────────────────────────────────────────────────────────
 
 def _make_plain_db(tmp_path: Path) -> Path:
@@ -622,7 +662,7 @@ def test_decrypt_dpapi_key_dpapi_success():
 
 
 def test_decrypt_key_valid_v10(monkeypatch):
-    """_decrypt_key decrypts a known v10-format test vector."""
+    """_decrypt_key decrypts a known v10-format test vector (macOS parameters)."""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes, padding as _pad
@@ -641,7 +681,8 @@ def test_decrypt_key_valid_v10(monkeypatch):
     ciphertext = encryptor.update(padded) + encryptor.finalize()
     encrypted_hex = (b"v10" + ciphertext).hex()
 
-    result = _decrypt_key(encrypted_hex, password)
+    with patch("signal_mcp.desktop.platform.system", return_value="Darwin"):
+        result = _decrypt_key(encrypted_hex, password)
     assert result == plaintext.hex()
 
 

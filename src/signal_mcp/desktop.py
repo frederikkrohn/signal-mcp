@@ -9,7 +9,7 @@ Signal Desktop stores:
   Windows: %APPDATA%/Signal/
 
   DB:  <dir>/sql/db.sqlite  (SQLCipher 4)
-  Key: <dir>/config.json    (encryptedKey, Chromium v10)
+  Key: <dir>/config.json    (encryptedKey, Chromium v10 / v11)
 
 The encryptedKey is AES-128-CBC encrypted with a password from the OS keychain:
   macOS:   Keychain service "Signal Safe Storage"
@@ -163,19 +163,23 @@ def _get_db_key_hex(encrypted_hex: str) -> str:
 
 
 def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
-    """Decrypt Signal Desktop's encryptedKey (Chromium v10 AES-CBC format)."""
+    """Decrypt Signal Desktop's encryptedKey (Chromium v10/v11 AES-CBC format)."""
     raw = bytes.fromhex(encrypted_hex)
-    if not raw.startswith(b"v10"):
+    # v10: macOS Keychain, or the hardcoded "peanuts" password on Linux.
+    # v11: Linux only — password comes from a keyring (libsecret / KWallet).
+    if raw[:3] not in (b"v10", b"v11"):
         raise DesktopImportError(f"Unknown encryptedKey format (prefix={raw[:3]!r})")
 
     ciphertext = raw[3:]
 
-    # Chromium key derivation: PBKDF2-SHA1, salt="saltysalt", 1003 iterations, 16 bytes
+    # Chromium key derivation: PBKDF2-SHA1, salt="saltysalt", 16 bytes.
+    # 1003 iterations on macOS, but only 1 on Linux (os_crypt_linux.cc).
+    iterations = 1003 if platform.system() == "Darwin" else 1
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA1(),  # noqa: S303  (Chromium's choice, not ours)
         length=16,
         salt=b"saltysalt",
-        iterations=1003,
+        iterations=iterations,
     )
     aes_key = kdf.derive(password)
 
