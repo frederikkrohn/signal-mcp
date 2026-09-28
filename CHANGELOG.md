@@ -2,6 +2,13 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.8] — 2026-09-28
+
+### Fixed
+
+- **On Linux, a `v10`-format Signal Desktop key could try the OS keyring password before the correct hardcoded `peanuts` password.** Signal Desktop only ever encrypts `v10` keys on Linux with `peanuts` — `v11` is the only keyring-backed format. A keyring entry left over from an unrelated app under the same label (`Signal Safe Storage` / `Electron Safe Storage`) would pick the wrong password and fail decryption for a `v10` key. Fixed at the source in `_get_keychain_password`; the `v11` path (`_require_linux_keyring_password`) was already correct and is unaffected. Also corrected a comment and error message that implied KWallet support — only libsecret-backed keyrings (via `secret-tool`) are supported.
+- **`tests/test_server.py` had real order-dependent test failures**, caused by a `reset_client` fixture that reset the local store but not the module-level contact/group caches or the daemon-alive/freshen cooldowns — several tests only passed because an earlier test happened to warm that state first. Fixed the fixture and the affected tests; verified clean across 29 randomized test-order seeds (5 previously failed).
+
 ## [1.38.7] — 2026-09-28
 
 ### Fixed
