@@ -83,9 +83,26 @@ def test_decrypt_key_linux_does_not_use_macos_iterations():
     with patch("signal_mcp.desktop.platform.system", return_value="Linux"):
         try:
             result = _decrypt_key(encrypted, b"pw")
-        except ValueError:
-            return  # wrong AES key → invalid padding
+        except DesktopImportError:
+            return  # wrong AES key → invalid padding, reported clearly
     assert result != db_key
+
+
+def test_decrypt_key_wrong_password_raises_desktop_import_error():
+    """A wrong password must not surface as a raw cryptography ValueError."""
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, b"correct-password", b"v10", 1003)
+    with patch("signal_mcp.desktop.platform.system", return_value="Darwin"), \
+         pytest.raises(DesktopImportError, match="password is wrong"):
+        _decrypt_key(encrypted, b"wrong-password")
+
+
+def test_decrypt_key_truncated_ciphertext_raises_desktop_import_error():
+    """A truncated/corrupt ciphertext (not a multiple of the AES block size) must
+    not surface as a raw cryptography ValueError."""
+    bad_hex = (b"v10" + b"\x00" * 5).hex()  # 5 bytes: not block-aligned for AES-128
+    with pytest.raises(DesktopImportError, match="password is wrong|corrupted"):
+        _decrypt_key(bad_hex, b"password")
 
 
 # ── DB parsing test ─────────────────────────────────────────────────────────────
@@ -527,6 +544,20 @@ def test_get_db_key_hex_linux_v11_without_keyring_entry():
          patch("signal_mcp.desktop.shutil.which", return_value="/usr/bin/secret-tool"), \
          patch.object(_d, "_decrypt_key") as mock_dk:
         with pytest.raises(DesktopImportError, match="found no Signal entry"):
+            _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v11_secret_tool_timeout():
+    """A secret-tool that never answers (e.g. stuck on an unlock prompt) must
+    surface as a clear DesktopImportError, not a raw subprocess.TimeoutExpired."""
+    import subprocess as _subprocess
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run",
+               side_effect=_subprocess.TimeoutExpired(cmd="secret-tool", timeout=10)), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="did not respond in time"):
             _d._get_db_key_hex(_V11_HEX)
     mock_dk.assert_not_called()
 

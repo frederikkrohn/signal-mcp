@@ -134,7 +134,14 @@ def _require_linux_keyring_password() -> bytes:
     Used for v11 keys, which are always encrypted with a keyring password — the
     hardcoded "peanuts" fallback can never decrypt them.
     """
-    password = _linux_keyring_password()
+    try:
+        password = _linux_keyring_password()
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopImportError(
+            "Signal Desktop's key is protected by your keyring, but secret-tool "
+            "did not respond in time.\n"
+            "It may be waiting on an unlock prompt — check for one and try again."
+        ) from exc
     if password is not None:
         return password
     if shutil.which("secret-tool") is None:
@@ -226,11 +233,21 @@ def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
     iv = b"\x20" * 16
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
     decryptor = cipher.decryptor()
-    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-    # Remove PKCS7 padding
-    unpadder = padding.PKCS7(128).unpadder()
-    db_key_bytes = unpadder.update(plaintext) + unpadder.finalize()
+    try:
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        # Remove PKCS7 padding
+        unpadder = padding.PKCS7(128).unpadder()
+        db_key_bytes = unpadder.update(plaintext) + unpadder.finalize()
+    except ValueError as exc:
+        # Wrong password derives the wrong AES key, which almost always fails
+        # PKCS7 unpadding; a truncated/corrupt ciphertext fails block-aligned
+        # AES-CBC decryption the same way. Either way this is not a bug in the
+        # server -- it's bad input, so it gets DesktopImportError like every
+        # other "this import cannot proceed" case rather than a raw ValueError.
+        raise DesktopImportError(
+            "Could not decrypt Signal Desktop's key — the password is wrong "
+            "or the encryptedKey is corrupted."
+        ) from exc
 
     # Signal Desktop stores the SQLCipher key as a hex-encoded ASCII string
     # (e.g. b'3a0aaac0...'), not raw binary bytes.  Decode it directly instead

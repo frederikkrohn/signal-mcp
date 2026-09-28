@@ -1,5 +1,6 @@
 """Coverage tests for signal_mcp/cli.py — uncovered lines."""
 
+import json
 import plistlib
 import subprocess
 from datetime import datetime
@@ -597,3 +598,232 @@ def test_uninstall_service_unsupported_platform(runner):
     with patch("platform.system", return_value="FreeBSD"):
         result = runner.invoke(cli, ["uninstall-service"])
     assert result.exit_code == 1
+
+
+# ── set-webhook / get-webhook ────────────────────────────────────────────────
+
+def test_set_webhook_sets_url(runner):
+    with patch("signal_mcp.config.set_webhook_url") as mock_set:
+        result = runner.invoke(cli, ["set-webhook", "http://localhost:8080/signal"])
+    assert result.exit_code == 0
+    assert "Webhook set: http://localhost:8080/signal" in result.output
+    mock_set.assert_called_once_with("http://localhost:8080/signal")
+
+
+def test_set_webhook_clears_url(runner):
+    with patch("signal_mcp.config.set_webhook_url") as mock_set:
+        result = runner.invoke(cli, ["set-webhook"])
+    assert result.exit_code == 0
+    assert "Webhook cleared." in result.output
+    mock_set.assert_called_once_with(None)
+
+
+def test_get_webhook_configured(runner):
+    with patch("signal_mcp.config.get_webhook_url", return_value="http://localhost:8080/signal"):
+        result = runner.invoke(cli, ["get-webhook"])
+    assert result.exit_code == 0
+    assert "http://localhost:8080/signal" in result.output
+
+
+def test_get_webhook_not_configured(runner):
+    with patch("signal_mcp.config.get_webhook_url", return_value=None):
+        result = runner.invoke(cli, ["get-webhook"])
+    assert result.exit_code == 0
+    assert "No webhook configured." in result.output
+
+
+# ── find-contact ─────────────────────────────────────────────────────────────
+
+def test_find_contact_no_matches(runner):
+    client = _mock_client(list_contacts=AsyncMock(return_value=[]))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["find-contact", "nobody"])
+    assert result.exit_code == 0
+    assert "No matching contacts." in result.output
+
+
+def test_find_contact_table(runner):
+    contacts = [Contact(number="+11111111111", name="Alice"),
+                Contact(number="+12222222222", name="Bob", blocked=True)]
+    client = _mock_client(list_contacts=AsyncMock(return_value=contacts))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["find-contact", "a"])
+    assert result.exit_code == 0
+    assert "Alice" in result.output
+    assert "BLOCKED" in result.output
+    client.list_contacts.assert_called_once_with(search="a")
+
+
+def test_find_contact_json(runner):
+    contacts = [Contact(number="+11111111111", name="Alice")]
+    client = _mock_client(list_contacts=AsyncMock(return_value=contacts))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["find-contact", "a", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["number"] == "+11111111111"
+
+
+def test_find_contact_signal_error(runner):
+    client = _mock_client(list_contacts=AsyncMock(side_effect=SignalError("daemon down")))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["find-contact", "a"])
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+
+
+# ── schedule-send / scheduled / cancel-scheduled / run-scheduled ─────────────
+
+def test_schedule_send_invalid_format(runner):
+    result = runner.invoke(cli, ["schedule-send", "+1", "hi", "--at", "not-a-date"])
+    assert result.exit_code == 1
+    assert "invalid --at value" in result.output
+
+
+def test_schedule_send_in_past(runner):
+    result = runner.invoke(cli, ["schedule-send", "+1", "hi", "--at", "2000-01-01 09:00"])
+    assert result.exit_code == 1
+    assert "must be in the future" in result.output
+
+
+def test_schedule_send_recipient(runner):
+    result = runner.invoke(cli, ["schedule-send", "+19999999999", "hi", "--at", "2999-01-01 09:00"])
+    assert result.exit_code == 0
+    assert "Scheduled" in result.output
+    assert "+19999999999" in result.output
+
+
+def test_schedule_send_group(runner):
+    result = runner.invoke(cli, ["schedule-send", "grp==", "hi", "--at", "2999-01-01T09:00:00", "--group"])
+    assert result.exit_code == 0
+    assert "Scheduled" in result.output
+
+
+def test_list_scheduled_empty(runner):
+    result = runner.invoke(cli, ["scheduled"])
+    assert result.exit_code == 0
+    assert "No scheduled messages." in result.output
+
+
+def test_list_scheduled_table(runner):
+    runner.invoke(cli, ["schedule-send", "+19999999999", "hi there", "--at", "2999-01-01 09:00"])
+    result = runner.invoke(cli, ["scheduled"])
+    assert result.exit_code == 0
+    assert "+19999999999" in result.output
+    assert "hi there" in result.output
+
+
+def test_list_scheduled_json(runner):
+    runner.invoke(cli, ["schedule-send", "+19999999999", "hi", "--at", "2999-01-01 09:00"])
+    result = runner.invoke(cli, ["scheduled", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["recipient"] == "+19999999999"
+
+
+def test_cancel_scheduled_success(runner):
+    schedule_result = runner.invoke(cli, ["schedule-send", "+1", "hi", "--at", "2999-01-01 09:00"])
+    job_id = int(schedule_result.output.split("id=")[1].split(")")[0])
+    result = runner.invoke(cli, ["cancel-scheduled", str(job_id)])
+    assert result.exit_code == 0
+    assert "Cancelled" in result.output
+
+
+def test_cancel_scheduled_not_found(runner):
+    result = runner.invoke(cli, ["cancel-scheduled", "999999"])
+    assert result.exit_code == 1
+    assert "No pending scheduled message" in result.output
+
+
+def test_run_scheduled_none_due(runner):
+    client = _mock_client(process_scheduled_messages=AsyncMock(return_value=[]))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["run-scheduled"])
+    assert result.exit_code == 0
+    assert "No scheduled messages due." in result.output
+
+
+def test_run_scheduled_sent_and_failed(runner):
+    results = [
+        {"id": 1, "status": "sent", "timestamp": 123},
+        {"id": 2, "status": "failed", "error": "not registered"},
+    ]
+    client = _mock_client(process_scheduled_messages=AsyncMock(return_value=results))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["run-scheduled"])
+    assert result.exit_code == 0
+    assert "Sent  id=1" in result.output
+    assert "Failed id=2: not registered" in result.output
+
+
+def test_run_scheduled_signal_error(runner):
+    client = _mock_client(process_scheduled_messages=AsyncMock(side_effect=SignalError("daemon down")))
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["run-scheduled"])
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+
+
+# ── install (setup wizard) ────────────────────────────────────────────────────
+
+def test_install_signal_cli_missing(runner):
+    with patch("signal_mcp.config.check_signal_cli_version",
+               side_effect=RuntimeError("signal-cli not found")):
+        result = runner.invoke(cli, ["install"])
+    assert result.exit_code == 1
+    assert "signal-cli not found" in result.output
+
+
+def test_install_no_account(runner):
+    with patch("signal_mcp.config.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", side_effect=RuntimeError("no account")), \
+         patch("subprocess.run", return_value=MagicMock(stdout="0.13.0\n")):
+        result = runner.invoke(cli, ["install"])
+    assert result.exit_code == 1
+    assert "No account found." in result.output
+    assert "signal-cli link" in result.output
+
+
+def test_install_service_already_installed(runner):
+    with patch("signal_mcp.config.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.config.is_service_installed", return_value=True), \
+         patch("subprocess.run", return_value=MagicMock(stdout="0.13.0\n")), \
+         patch("signal_mcp.cli._find_binary", return_value="/usr/local/bin/signal-mcp"):
+        result = runner.invoke(cli, ["install"])
+    assert result.exit_code == 0
+    assert "already installed" in result.output
+    assert "Setup complete." in result.output
+
+
+def test_install_service_declined(runner):
+    with patch("signal_mcp.config.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.config.is_service_installed", return_value=False), \
+         patch("subprocess.run", return_value=MagicMock(stdout="0.13.0\n")), \
+         patch("signal_mcp.cli._find_binary", return_value="/usr/local/bin/signal-mcp"):
+        result = runner.invoke(cli, ["install"], input="n\n")
+    assert result.exit_code == 0
+    assert "Setup complete." in result.output
+
+
+def test_install_service_confirmed(runner, tmp_path, monkeypatch):
+    import signal_mcp.cli as cli_mod
+    plist_path = tmp_path / "com.signal-mcp.watch.plist"
+    monkeypatch.setattr(cli_mod, "PLIST_PATH", plist_path)
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stderr = ""
+    mock_result.stdout = "0.13.0\n"
+
+    with patch("signal_mcp.config.check_signal_cli_version"), \
+         patch("signal_mcp.cli.detect_account", return_value="+10000000000"), \
+         patch("signal_mcp.config.is_service_installed", return_value=False), \
+         patch("signal_mcp.cli._find_binary_args", return_value=["/usr/local/bin/signal-mcp"]), \
+         patch("subprocess.run", return_value=mock_result), \
+         patch("platform.system", return_value="Darwin"), \
+         patch("signal_mcp.cli._find_binary", return_value="/usr/local/bin/signal-mcp"):
+        result = runner.invoke(cli, ["install"], input="y\n")
+    assert result.exit_code == 0
+    assert plist_path.exists()
+    assert "Setup complete." in result.output
