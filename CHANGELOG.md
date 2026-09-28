@@ -2,6 +2,18 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.38.9] — 2026-09-28
+
+### Fixed
+
+- **A wrong password or corrupted/truncated Signal Desktop `encryptedKey` raised a raw `cryptography` `ValueError`** instead of the clear `DesktopImportError` every other import failure uses. `_decrypt_key` now wraps AES/PKCS7 decryption accordingly.
+- **A `secret-tool` that never responds (e.g. stuck on an unanswered keyring-unlock prompt) escaped as a raw `subprocess.TimeoutExpired`.** `_require_linux_keyring_password` now catches it with a specific message.
+
+### Testing
+
+- `cli.py` coverage: 82% → 97% (set-webhook/get-webhook, find-contact, schedule-send/scheduled/cancel-scheduled/run-scheduled, the `install` wizard). Total project coverage: 93% → 97%, 715 tests.
+- Found and fixed two more local-import-shadowing test bugs: `install()` re-imports `check_signal_cli_version` and `is_service_installed` from `.config` inside its own body, so patching `signal_mcp.cli.*` for them silently no-ops — one existing test was passing only by coincidence, because this machine's own background service happens to be installed.
+
 ## [1.38.8] — 2026-09-28
 
 ### Fixed
