@@ -489,6 +489,56 @@ def test_get_db_key_hex_macos_path(monkeypatch):
     mock_dk.assert_called_once()
 
 
+_V11_HEX = (b"v11" + b"\x00" * 16).hex()
+_V10_HEX = (b"v10" + b"\x00" * 16).hex()
+
+
+def test_get_db_key_hex_linux_v11_uses_keyring_password():
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch.object(_d, "_linux_keyring_password", return_value=b"keyring-pw"), \
+         patch.object(_d, "_decrypt_key", return_value="deadbeef" * 8) as mock_dk:
+        result = _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_called_once_with(_V11_HEX, b"keyring-pw")
+    assert result == "deadbeef" * 8
+
+
+def test_get_db_key_hex_linux_v11_without_secret_tool_names_the_package():
+    """v11 + no secret-tool must not fall back to 'peanuts' — it can never decrypt v11."""
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=FileNotFoundError), \
+         patch("signal_mcp.desktop.shutil.which", return_value=None), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="secret-tool is not installed") as exc:
+            _d._get_db_key_hex(_V11_HEX)
+    assert "libsecret-tools" in str(exc.value)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v11_without_keyring_entry():
+    from signal_mcp import desktop as _d
+    no_entry = MagicMock()
+    no_entry.return_value.returncode = 1
+    no_entry.return_value.stdout = ""
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", no_entry), \
+         patch("signal_mcp.desktop.shutil.which", return_value="/usr/bin/secret-tool"), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="found no Signal entry"):
+            _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v10_keeps_peanuts_fallback():
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=FileNotFoundError), \
+         patch.object(_d, "_decrypt_key", return_value="deadbeef" * 8) as mock_dk:
+        _d._get_db_key_hex(_V10_HEX)
+    mock_dk.assert_called_once_with(_V10_HEX, b"peanuts")
+
+
 # ── Temp file cleanup on error ─────────────────────────────────────────────────
 
 @patch("signal_mcp.desktop.detect_account", return_value="+49111")
@@ -717,6 +767,28 @@ def test_find_sqlcipher_not_found():
          patch("signal_mcp.desktop.subprocess.run", return_value=which_result):
         with pytest.raises(DesktopImportError, match="sqlcipher not found"):
             _find_sqlcipher()
+
+
+@pytest.mark.parametrize(
+    "system, expected, unexpected",
+    [
+        ("Darwin", "brew install sqlcipher", "apt"),
+        ("Linux", "sudo apt install sqlcipher", "brew"),
+        ("FreeBSD", "on your PATH", "brew"),
+    ],
+)
+def test_find_sqlcipher_not_found_hint_matches_platform(system, expected, unexpected):
+    from signal_mcp.desktop import _find_sqlcipher, DesktopImportError
+    which_result = MagicMock()
+    which_result.returncode = 1
+    which_result.stdout = ""
+    with patch("signal_mcp.desktop.Path.exists", return_value=False), \
+         patch("signal_mcp.desktop.subprocess.run", return_value=which_result), \
+         patch("signal_mcp.desktop.platform.system", return_value=system):
+        with pytest.raises(DesktopImportError, match="sqlcipher not found") as exc:
+            _find_sqlcipher()
+    assert expected in str(exc.value)
+    assert unexpected not in str(exc.value)
 
 
 def test_decrypt_db_to_temp_success(tmp_path):

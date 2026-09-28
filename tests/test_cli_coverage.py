@@ -356,6 +356,26 @@ def test_import_desktop_error(runner):
     assert "Error:" in result.output
 
 
+@pytest.mark.parametrize("command, target", [
+    ("import-desktop", "signal_mcp.desktop.import_from_desktop"),
+    ("sync-desktop", "signal_mcp.desktop.sync_from_desktop"),
+])
+@pytest.mark.parametrize("system, shown", [("Darwin", True), ("Linux", False)])
+def test_keychain_note_only_on_macos(runner, command, target, system, shown):
+    result_data = {"imported": 1, "skipped": 0, "total": 1, "since": None, "incremental": False}
+    with patch(target, return_value=result_data), \
+         patch("platform.system", return_value=system):
+        result = runner.invoke(cli, [command])
+    assert result.exit_code == 0
+    assert ("Keychain access" in result.output) is shown
+
+
+def test_import_desktop_help_is_not_macos_only(runner):
+    result = runner.invoke(cli, ["import-desktop", "--help"])
+    assert "macOS" not in result.output
+    assert "sqlcipher" in result.output
+
+
 # ── pin SignalError ───────────────────────────────────────────────────────────
 
 def test_pin_signal_error(runner):

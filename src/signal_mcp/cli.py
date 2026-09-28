@@ -644,16 +644,22 @@ def prune(days: int, confirmed: bool):
 
 # ── import-desktop ────────────────────────────────────────────────────────────
 
+def _echo_keychain_note() -> None:
+    import platform
+    if platform.system() == "Darwin":
+        click.echo("  Note: macOS may ask for Keychain access — click Allow.")
+
+
 @cli.command("import-desktop")
 def import_desktop():
-    """Import ALL messages from Signal Desktop (requires macOS Keychain access)."""
+    """Import ALL messages from Signal Desktop (requires sqlcipher and OS keychain/keyring access)."""
     from .desktop import import_from_desktop, DesktopImportError
 
     def progress(msg):
         click.echo(f"  {msg}")
 
     click.echo("Importing from Signal Desktop…")
-    click.echo("  Note: macOS may ask for Keychain access — click Allow.")
+    _echo_keychain_note()
     try:
         result = import_from_desktop(progress_cb=progress)
         click.echo(f"\nDone: {result['imported']} imported, {result['skipped']} already stored ({result['total']} total)")
@@ -673,7 +679,7 @@ def sync_desktop():
         click.echo(f"  {msg}")
 
     click.echo("Syncing from Signal Desktop…")
-    click.echo("  Note: macOS may ask for Keychain access — click Allow.")
+    _echo_keychain_note()
     try:
         result = sync_from_desktop(progress_cb=progress)
         if result["incremental"]:

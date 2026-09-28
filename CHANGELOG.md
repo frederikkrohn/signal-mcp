@@ -7,6 +7,12 @@ All notable changes to signal-mcp are documented here.
 ### Fixed
 
 - **`import-desktop` / `sync-desktop` failed on Linux with `Unknown encryptedKey format (prefix=b'v11')`** whenever Signal Desktop stores its key through a keyring (libsecret / KWallet). `_decrypt_key` only handled the macOS variant of Chromium's format: prefix `v10` and 1003 PBKDF2 iterations. Linux uses `v11` for keyring-backed keys and a single iteration, so the `v10` / `peanuts` fallback was affected too. Both prefixes are accepted now and the iteration count follows the platform. (#8)
+- **A missing `secret-tool` on Linux ended in an opaque decryption error.** The keyring lookup silently fell back to the hardcoded `peanuts` password, which can never decrypt a keyring-backed (`v11`) key. For `v11` keys the import now stops with a message that says whether `secret-tool` is missing or the keyring has no Signal entry. The `peanuts` fallback is unchanged for `v10` keys. (#8)
+- **The "sqlcipher not found" hint suggested `brew install sqlcipher` on every platform.** It now names the install command for the current platform. (#8)
+
+### Changed
+
+- `import-desktop` / `sync-desktop` print the "macOS may ask for Keychain access" note on macOS only, and the `import-desktop` help text no longer says it requires the macOS Keychain. README setup steps for the Desktop import now cover Linux. (#8)
 
 ## [1.38.4] — 2026-09-25
 

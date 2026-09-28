@@ -160,11 +160,18 @@ Restart Claude Code. Signal tools appear automatically — ask Claude *"check my
 
 ### Step 5 — (Optional) Import Signal Desktop history
 
-If you use Signal Desktop on macOS, import your full message history in one command:
+If you use Signal Desktop, import your full message history in one command.
 
+**macOS**
 ```bash
 brew install sqlcipher       # required for decryption
 signal-mcp import-desktop    # macOS will prompt for Keychain access — click Allow
+```
+
+**Linux** (Debian/Ubuntu shown — use your distribution's packages elsewhere)
+```bash
+sudo apt install sqlcipher libsecret-tools   # decryption + keyring lookup (secret-tool)
+signal-mcp import-desktop                    # your keyring must be unlocked
 ```
 
 ### Step 6 — (Optional) Enable background message capture
@@ -377,7 +384,7 @@ signal-mcp install-service   # background watcher, auto-starts on login
 
 **Retroactively** (imports everything from Signal Desktop):
 ```bash
-signal-mcp import-desktop    # macOS will prompt for Keychain access — click Allow
+signal-mcp import-desktop    # macOS prompts for Keychain access; Linux needs an unlocked keyring
 ```
 
 Run both for complete coverage.
