@@ -43,12 +43,20 @@ def reset_caches(monkeypatch):
     # Module-level caches that leak between tests if not reset -- without
     # this, a test can pass only because an earlier test happened to warm
     # the contact/group cache or the freshen/daemon-alive cooldowns first.
+    #
+    # Default to *pre-warmed empty* rather than cold/unloaded: most tests in
+    # this file don't care about contact/group name resolution and never
+    # mock listContacts/listGroups, so a cold cache makes _ensure_caches()
+    # issue a real, unmocked RPC -- which silently succeeded locally against
+    # a real running daemon but hard-fails in CI with no daemon at all. Tests
+    # that specifically exercise the cache-loading path set these explicitly.
+    import time as _time
     monkeypatch.setattr(_client_mod, "_contact_cache", {})
-    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", False)
-    monkeypatch.setattr(_client_mod, "_contact_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
     monkeypatch.setattr(_client_mod, "_group_cache", {})
-    monkeypatch.setattr(_client_mod, "_group_cache_loaded", False)
-    monkeypatch.setattr(_client_mod, "_group_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     monkeypatch.setattr(_client_mod, "_daemon_last_ok_at", 0.0)
     monkeypatch.setattr(_server_mod, "_last_freshen_at", 0.0)
 
