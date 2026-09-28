@@ -2,7 +2,7 @@
 
 All notable changes to signal-mcp are documented here.
 
-## [Unreleased]
+## [1.38.7] — 2026-09-28
 
 ### Fixed
 
