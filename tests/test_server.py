@@ -8,7 +8,9 @@ import pytest
 import respx
 import httpx
 
+import signal_mcp.client as _client_mod
 import signal_mcp.config as _config_mod
+import signal_mcp.server as _server_mod
 import signal_mcp.store as _store_mod
 from signal_mcp.config import DAEMON_URL
 from signal_mcp.models import Contact, Message
@@ -34,6 +36,21 @@ def reset_client(monkeypatch, tmp_path):
     async def noop(): pass
     monkeypatch.setattr(test_client, "ensure_daemon", noop)
     return test_client
+
+
+@pytest.fixture(autouse=True)
+def reset_caches(monkeypatch):
+    # Module-level caches that leak between tests if not reset -- without
+    # this, a test can pass only because an earlier test happened to warm
+    # the contact/group cache or the freshen/daemon-alive cooldowns first.
+    monkeypatch.setattr(_client_mod, "_contact_cache", {})
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_group_cache", {})
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", False)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", 0.0)
+    monkeypatch.setattr(_client_mod, "_daemon_last_ok_at", 0.0)
+    monkeypatch.setattr(_server_mod, "_last_freshen_at", 0.0)
 
 
 @respx.mock
@@ -1321,9 +1338,15 @@ async def test_tool_remove_pin():
 @respx.mock
 @pytest.mark.asyncio
 async def test_tool_receive_messages_service_conflict_falls_back(monkeypatch):
+    import time as _time
     from signal_mcp.models import Message
     from datetime import datetime
     import signal_mcp.server as _srv
+
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
 
     # Simulate "already being received" error from daemon
     async def _fail_receive(*a, **kw):
@@ -1350,6 +1373,10 @@ async def test_freshen_store_cooldown_skips_poll(monkeypatch):
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: False)
     # Set last freshen to "just now" so cooldown is active
     monkeypatch.setattr(_srv, "_last_freshen_at", time.monotonic())
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", time.monotonic())
     # No respx route — if receive_messages is called it will fail
     result = await call_tool("get_unread", {})
     data = json.loads(result[0].text)
@@ -1361,9 +1388,16 @@ async def test_freshen_store_cooldown_skips_poll(monkeypatch):
 @pytest.mark.asyncio
 async def test_freshen_store_swallows_receive_exception(monkeypatch):
     """_freshen_store must not propagate exceptions from receive_messages."""
+    import time as _time
     import signal_mcp.server as _srv
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: False)
     monkeypatch.setattr(_srv, "_last_freshen_at", 0.0)
+    # Pre-warm the contact/group caches so _ensure_caches() makes no RPC call --
+    # this test is about receive_messages's exception being swallowed, not caching.
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     # Simulate receive_messages failing (connection error)
     respx.post(DAEMON_URL).mock(side_effect=Exception("daemon gone"))
     result = await call_tool("get_unread", {})
@@ -1391,7 +1425,14 @@ async def test_get_unread_no_service_includes_warning(monkeypatch):
 @respx.mock
 @pytest.mark.asyncio
 async def test_get_unread_with_service_no_warning(monkeypatch):
+    import time as _time
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: True)
+    # Pre-warm the contact/group caches so _ensure_caches() makes no RPC call --
+    # this test is about the _warning field, not caching.
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     result = await call_tool("get_unread", {})
     data = json.loads(result[0].text)
     assert "_warning" not in data
@@ -1540,8 +1581,13 @@ async def test_get_unread_has_more_false_when_exact_limit():
 # Bug 5: dead mark_as_read block in get_conversation — verify no double-marking
 @respx.mock
 @pytest.mark.asyncio
-async def test_get_conversation_marks_incoming_as_read():
+async def test_get_conversation_marks_incoming_as_read(monkeypatch):
     """get_conversation must mark incoming messages as read exactly once."""
+    import time as _time
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     _store_mod.init_db()
     _store_mod.save_message(Message(
         id="cv_in1", sender="+12223334444", body="hello conv",

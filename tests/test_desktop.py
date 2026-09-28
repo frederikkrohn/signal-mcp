@@ -591,15 +591,14 @@ def test_linux_keychain_fallback_to_peanuts(monkeypatch):
     assert result == b"peanuts"
 
 
-def test_linux_keychain_secret_tool_success(monkeypatch):
-    """When secret-tool succeeds on Linux, its output is returned."""
-    from signal_mcp.desktop import _get_keychain_password
+def test_linux_keyring_password_application_lookup_success(monkeypatch):
+    """When secret-tool's application lookup succeeds on Linux, its output is returned."""
+    from signal_mcp.desktop import _linux_keyring_password
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = "my_secret\n"
-    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
-         patch("signal_mcp.desktop.subprocess.run", mock_run):
-        result = _get_keychain_password()
+    with patch("signal_mcp.desktop.subprocess.run", mock_run):
+        result = _linux_keyring_password()
     assert result == b"my_secret"
 
 
@@ -637,14 +636,11 @@ def test_get_keychain_password_darwin_all_fail(monkeypatch):
             _get_keychain_password()
 
 
-def test_get_keychain_password_linux_label_success(monkeypatch):
+def test_linux_keyring_password_label_lookup_success(monkeypatch):
     """Linux: second secret-tool lookup (by label) succeeds."""
-    from signal_mcp.desktop import _get_keychain_password
-
-    call_count = [0]
+    from signal_mcp.desktop import _linux_keyring_password
 
     def fake_run(cmd, **kwargs):
-        call_count[0] += 1
         result = MagicMock()
         # First call (lookup application) → fail; second (lookup label) → succeed
         if "application" in cmd:
@@ -655,10 +651,23 @@ def test_get_keychain_password_linux_label_success(monkeypatch):
             result.stdout = "labelpassword\n"
         return result
 
-    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
-         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
-        result = _get_keychain_password()
+    with patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
+        result = _linux_keyring_password()
     assert result == b"labelpassword"
+
+
+def test_get_keychain_password_linux_always_peanuts(monkeypatch):
+    """Linux: _get_keychain_password is only used for v10 keys, which Signal
+    Desktop always encrypts with this hardcoded password -- it must never try
+    the keyring, since an unrelated app's entry under the same label would
+    derive the wrong AES key (see _require_linux_keyring_password for v11)."""
+    from signal_mcp.desktop import _get_keychain_password
+
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run") as mock_run:
+        result = _get_keychain_password()
+    assert result == b"peanuts"
+    mock_run.assert_not_called()
 
 
 def test_get_keychain_password_windows_raises():

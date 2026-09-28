@@ -80,8 +80,12 @@ def _get_keychain_password() -> bytes:
         )
 
     elif system == "Linux":
-        # Signal Desktop on Linux falls back to hardcoded password when no keyring is available
-        return _linux_keyring_password() or b"peanuts"
+        # Signal Desktop always encrypts a v10 key on Linux with this hardcoded
+        # password. v11 keys (keyring-backed) never reach this function --
+        # _get_db_key_hex routes those to _require_linux_keyring_password()
+        # instead, since trying the keyring here could pick up an unrelated
+        # app's entry under the same label and derive the wrong AES key.
+        return b"peanuts"
 
     elif system == "Windows":
         # On Windows, Electron's safeStorage uses DPAPI to encrypt the key directly.
@@ -140,7 +144,9 @@ def _require_linux_keyring_password() -> bytes:
         )
     raise DesktopImportError(
         "Signal Desktop's key is protected by your keyring, but secret-tool found no Signal entry.\n"
-        "Make sure the keyring is unlocked and that you are the user who runs Signal Desktop."
+        "Make sure the keyring is unlocked and that you are the user who runs Signal Desktop.\n"
+        "Only libsecret-backed keyrings (GNOME Keyring) are supported — KWallet-only setups "
+        "will hit this error even when unlocked."
     )
 
 
@@ -197,7 +203,9 @@ def _decrypt_key(encrypted_hex: str, password: bytes) -> str:
     """Decrypt Signal Desktop's encryptedKey (Chromium v10/v11 AES-CBC format)."""
     raw = bytes.fromhex(encrypted_hex)
     # v10: macOS Keychain, or the hardcoded "peanuts" password on Linux.
-    # v11: Linux only — password comes from a keyring (libsecret / KWallet).
+    # v11: Linux only — password comes from a libsecret keyring (secret-tool).
+    # KWallet-only setups (no libsecret) aren't supported: secret-tool finds
+    # nothing and _require_linux_keyring_password's error names the wrong cause.
     if raw[:3] not in (b"v10", b"v11"):
         raise DesktopImportError(f"Unknown encryptedKey format (prefix={raw[:3]!r})")
 
