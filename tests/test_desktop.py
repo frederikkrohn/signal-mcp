@@ -22,6 +22,14 @@ from signal_mcp.desktop import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_import_lock(tmp_path, monkeypatch):
+    """Keep import_from_desktop off the real ~/.local/share lock file: concurrent
+    pytest runs (or a live desktop sync) otherwise collide on it, and a test's
+    cleanup would delete a real sync's lock."""
+    monkeypatch.setattr("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", tmp_path / "desktop-import.lock")
+
+
 # ── Unit tests ─────────────────────────────────────────────────────────────────
 
 def test_decode_group_id_none():

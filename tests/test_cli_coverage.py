@@ -827,3 +827,107 @@ def test_install_service_confirmed(runner, tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert plist_path.exists()
     assert "Setup complete." in result.output
+
+
+# ── receive: watch fallback / error survival / webhook ───────────────────────
+
+def test_receive_watch_desktop_error_falls_back_to_signal_cli(runner):
+    """A DesktopImportError in watch mode switches permanently to signal-cli receive."""
+    from signal_mcp.desktop import DesktopImportError
+    msg = _msg(body="via cli fallback")
+    client = _mock_client()
+    calls = [0]
+
+    async def _receive(**kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            return [msg]
+        raise KeyboardInterrupt()
+
+    async def _fast_sleep(_):
+        pass
+
+    client.receive_direct = _receive
+    sync = MagicMock(side_effect=DesktopImportError("db locked"))
+    with patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.desktop.SIGNAL_DB") as mock_db, \
+         patch("signal_mcp.desktop.sync_from_desktop", sync), \
+         patch("asyncio.sleep", side_effect=_fast_sleep):
+        mock_db.exists.return_value = True
+        result = runner.invoke(cli, ["receive", "--watch"])
+    assert result.exit_code == 0
+    assert "via Signal Desktop DB" in result.output
+    assert "desktop sync error: db locked" in result.output
+    assert "falling back to signal-cli receive" in result.output
+    assert "via cli fallback" in result.output
+    sync.assert_called_once()  # desktop not retried after fallback
+
+
+def test_receive_watch_survives_transient_error(runner):
+    """A generic receive error is reported and the watch loop keeps going."""
+    msg = _msg(body="after recovery")
+    client = _mock_client()
+    calls = [0]
+
+    async def _receive(**kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("socket reset")
+        if calls[0] == 2:
+            return [msg]
+        raise KeyboardInterrupt()
+
+    async def _fast_sleep(_):
+        pass
+
+    client.receive_direct = _receive
+    with patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.desktop.SIGNAL_DB") as mock_db, \
+         patch("asyncio.sleep", side_effect=_fast_sleep):
+        mock_db.exists.return_value = False
+        result = runner.invoke(cli, ["receive", "--watch"])
+    assert result.exit_code == 0
+    assert "[watch] receive error: socket reset" in result.output
+    assert "after recovery" in result.output
+
+
+def test_receive_posts_to_webhook(runner):
+    """receive with --webhook POSTs the batch; --json output stays machine-readable."""
+    msg = _msg(body="hooked")
+    client = _mock_client()
+    client.receive_direct = AsyncMock(return_value=[msg])
+    post = AsyncMock()
+    with patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.webhook.post_webhook_batch", post):
+        result = runner.invoke(cli, ["receive", "--json", "--webhook", "https://example.test/hook"])
+    assert result.exit_code == 0
+    post.assert_awaited_once_with("https://example.test/hook", [msg])
+    assert json.loads(result.output.strip())["body"] == "hooked"
+
+
+def test_receive_watch_posts_to_webhook(runner):
+    """Watch mode (signal-cli path) POSTs each non-empty batch to the webhook."""
+    msg = _msg(body="watch hooked")
+    client = _mock_client()
+    calls = [0]
+
+    async def _receive(**kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            return [msg]
+        raise KeyboardInterrupt()
+
+    async def _fast_sleep(_):
+        pass
+
+    client.receive_direct = _receive
+    post = AsyncMock()
+    with patch("signal_mcp.cli.SignalClient", return_value=client), \
+         patch("signal_mcp.desktop.SIGNAL_DB") as mock_db, \
+         patch("signal_mcp.webhook.post_webhook_batch", post), \
+         patch("asyncio.sleep", side_effect=_fast_sleep):
+        mock_db.exists.return_value = False
+        result = runner.invoke(cli, ["receive", "--watch", "--webhook", "https://example.test/hook"])
+    assert result.exit_code == 0
+    assert "Webhook: https://example.test/hook" in result.output
+    post.assert_awaited_once_with("https://example.test/hook", [msg])

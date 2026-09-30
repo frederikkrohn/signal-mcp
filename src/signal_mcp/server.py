@@ -76,6 +76,15 @@ def _require(arguments: dict, *keys: str) -> str | None:
     return None
 
 
+def _paging(arguments: dict, default_limit: int = 50, max_limit: int = 500) -> tuple[int, int]:
+    """Clamp limit/offset from tool arguments. A negative SQLite LIMIT means
+    "no limit", so an unclamped value here would let a bad limit remove the
+    cap entirely and return the whole store in one response."""
+    limit = max(1, min(int(arguments.get("limit", default_limit)), max_limit))
+    offset = max(0, int(arguments.get("offset", 0)))
+    return limit, offset
+
+
 # ── Tool definitions ───────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -1697,8 +1706,7 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
                     since = datetime.fromisoformat(arguments["since"])
                 except ValueError:
                     return _err(f"Invalid since date: {arguments['since']}")
-            limit = int(arguments.get("limit", 50))
-            offset = int(arguments.get("offset", 0))
+            limit, offset = _paging(arguments)
             await client._ensure_caches()
             messages, total = await asyncio.gather(
                 client.get_conversation(
@@ -1727,11 +1735,12 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
                         bounds[key] = datetime.fromisoformat(arguments[key])
                     except ValueError:
                         return _err(f"Invalid {key} date: {arguments[key]}")
+            limit, offset = _paging(arguments)
             await client._ensure_caches()
             messages = await client.search_messages(
                 arguments["query"],
-                limit=int(arguments.get("limit", 50)),
-                offset=int(arguments.get("offset", 0)),
+                limit=limit,
+                offset=offset,
                 sender=arguments.get("sender"),
                 since=bounds["since"],
                 until=bounds["until"],
@@ -1833,7 +1842,7 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
         elif name == "get_unread":
             await client._ensure_caches()
             warning = await _freshen_store(client)
-            limit = int(arguments.get("limit", 50))
+            limit, _ = _paging(arguments)
             # Fetch one extra to detect whether more exist without a COUNT query
             messages = await client.get_unread_messages(limit=limit + 1)
             has_more = len(messages) > limit

@@ -27,6 +27,7 @@ from .config import (
     is_service_installed,
     read_daemon_pid,
     save_daemon_pid,
+    validate_send_path,
 )
 from .formatting import parse_styled_text
 from .models import Attachment, Contact, Group, GroupMember, Message, SendResult
@@ -441,7 +442,10 @@ class SignalClient:
         _validate_e164(recipient)
         await self._rate_limiter.acquire()
         paths = [path] if isinstance(path, str) else path
-        resolved = [str(Path(p).expanduser().resolve()) for p in paths]
+        try:
+            resolved = [str(validate_send_path(p)) for p in paths]
+        except ValueError as e:
+            raise SignalError(str(e)) from e
         params: dict = {"recipient": [recipient], "attachment": resolved}
         if caption:
             params["message"] = caption
@@ -467,7 +471,10 @@ class SignalClient:
     ) -> SendResult:
         await self._rate_limiter.acquire()
         paths = [path] if isinstance(path, str) else path
-        resolved = [str(Path(p).expanduser().resolve()) for p in paths]
+        try:
+            resolved = [str(validate_send_path(p)) for p in paths]
+        except ValueError as e:
+            raise SignalError(str(e)) from e
         params: dict = {"groupId": group_id, "attachment": resolved}
         if caption:
             params["message"] = caption
@@ -901,7 +908,10 @@ class SignalClient:
         if about is not None:
             params["about"] = about
         if avatar_path is not None:
-            params["avatarPath"] = str(Path(avatar_path).expanduser().resolve())
+            try:
+                params["avatarPath"] = str(validate_send_path(avatar_path))
+            except ValueError as e:
+                raise SignalError(str(e)) from e
         if remove_avatar:
             params["removeAvatar"] = True
         await self._rpc("updateProfile", params or None)
@@ -1139,7 +1149,10 @@ class SignalClient:
 
         Returns the signal.art URL for the published pack.
         """
-        resolved = str(Path(path).expanduser().resolve())
+        try:
+            resolved = str(validate_send_path(path))
+        except ValueError as e:
+            raise SignalError(str(e)) from e
         result = await self._rpc("uploadStickerPack", {"path": resolved})
         if isinstance(result, dict):
             return result.get("url", "") or str(result)

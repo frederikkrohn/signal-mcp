@@ -1055,3 +1055,78 @@ async def test_join_group_raises_on_non_dict_result(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
     with pytest.raises(SignalError, match="joinGroup"):
         await client.join_group("https://signal.group/#abc")
+
+
+# ── receive_direct: stdout parsing ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_receive_direct_parses_stdout_skips_junk_and_does_not_store_receipts(client, monkeypatch):
+    """Blank/non-JSON lines are skipped; data messages are stored, receipts returned but not stored."""
+    import json as _json
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+    lines = [
+        _json.dumps({"envelope": {"source": "+13333333333", "dataMessage": {
+            "timestamp": 1700000000001, "message": "hi from cli", "attachments": []}}}),
+        "",
+        "INFO not json at all",
+        _json.dumps({"envelope": {"source": "+14444444444", "timestamp": 1700000000002,
+                                  "receiptMessage": {"type": "DELIVERY", "timestamps": [1]}}}),
+    ]
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=("\n".join(lines).encode(), b""))
+    proc_mock.returncode = 0
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        result = await client.receive_direct(timeout=1)
+
+    assert [m.body for m in result if not m.receipt_type] == ["hi from cli"]
+    assert [m.receipt_type for m in result if m.receipt_type] == ["DELIVERY"]
+    assert [m.body for m in _store_mod.get_conversation("+13333333333")] == ["hi from cli"]
+    assert _store_mod.get_conversation("+14444444444") == []
+
+
+# ── process_scheduled_messages ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_process_scheduled_messages_routes_sends_and_records_outcomes(client, monkeypatch):
+    """Due jobs go to direct/group send; success marks sent, failure marks failed and continues."""
+    from datetime import timedelta
+    past = datetime.now() - timedelta(minutes=1)
+    ok_id = _store_mod.add_scheduled_message("direct hi", past, recipient="+15555555555")
+    grp_id = _store_mod.add_scheduled_message("group hi", past, group_id="grp1")
+    bad_id = _store_mod.add_scheduled_message("will fail", past, recipient="+16666666666")
+    future_id = _store_mod.add_scheduled_message("later", datetime.now() + timedelta(days=1),
+                                                 recipient="+15555555555")
+
+    monkeypatch.setattr(client, "ensure_daemon", AsyncMock())
+
+    async def fake_send(recipient, message):
+        if recipient == "+16666666666":
+            raise SignalError("unregistered user")
+        return SendResult(timestamp=111, recipient=recipient, success=True)
+
+    send_msg = AsyncMock(side_effect=fake_send)
+    send_grp = AsyncMock(return_value=SendResult(timestamp=222, recipient="grp1", success=True))
+    monkeypatch.setattr(client, "send_message", send_msg)
+    monkeypatch.setattr(client, "send_group_message", send_grp)
+
+    results = await client.process_scheduled_messages()
+
+    by_id = {r["id"]: r for r in results}
+    assert set(by_id) == {ok_id, grp_id, bad_id}  # future job untouched
+    assert by_id[ok_id] == {"id": ok_id, "status": "sent", "timestamp": 111}
+    assert by_id[grp_id]["status"] == "sent" and by_id[grp_id]["timestamp"] == 222
+    assert by_id[bad_id]["status"] == "failed" and "unregistered" in by_id[bad_id]["error"]
+    send_grp.assert_awaited_once_with("grp1", "group hi")
+
+    rows = {r["id"]: r for r in _store_mod.list_scheduled_messages(include_done=True)}
+    assert rows[ok_id]["status"] == "sent"
+    assert rows[grp_id]["status"] == "sent"
+    assert rows[bad_id]["status"] == "failed" and "unregistered" in rows[bad_id]["error"]
+    assert rows[future_id]["status"] == "pending"
+    # Sent/failed jobs are not picked up again on the next run
+    assert await client.process_scheduled_messages() == []
