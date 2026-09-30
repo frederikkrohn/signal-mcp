@@ -259,36 +259,48 @@ def _safe_fts_query(query: str) -> str:
 
 
 def search_messages(
-    query: str, limit: int = 50, offset: int = 0, sender: str | None = None
+    query: str, limit: int = 50, offset: int = 0, sender: str | None = None,
+    since: datetime | None = None, until: datetime | None = None,
 ) -> list[Message]:
     """Full-text search across all stored messages. Falls back to LIKE on FTS error.
 
     sender: if given, restrict results to messages from this phone number.
+    since / until: restrict to messages with since <= timestamp < until.
     offset: skip this many results (for pagination).
     """
     if not query or not query.strip():
         return []
     init_db()
     with _db() as conn:
-        fts_sender_clause  = "AND m.sender = ?" if sender else ""
-        like_sender_clause = "AND sender = ?"   if sender else ""
-        sender_args = [sender] if sender else []
+        filters: list[str] = []
+        filter_args: list = []
+        if sender:
+            filters.append("sender = ?")
+            filter_args.append(sender)
+        if since:
+            filters.append("timestamp >= ?")
+            filter_args.append(int(since.timestamp() * 1000))
+        if until:
+            filters.append("timestamp < ?")
+            filter_args.append(int(until.timestamp() * 1000))
+        fts_filter_clause  = "".join(f" AND m.{f}" for f in filters)
+        like_filter_clause = "".join(f" AND {f}" for f in filters)
         try:
             rows = conn.execute(
                 f"""SELECT m.* FROM messages m
                    JOIN messages_fts f ON m.rowid = f.rowid
                    WHERE messages_fts MATCH ?
-                   {fts_sender_clause}
+                   {fts_filter_clause}
                    ORDER BY m.timestamp DESC LIMIT ? OFFSET ?""",
-                [_safe_fts_query(query)] + sender_args + [limit, offset],
+                [_safe_fts_query(query)] + filter_args + [limit, offset],
             ).fetchall()
         except Exception:
             # Escape LIKE wildcards so literal % and _ in query don't over-match
             like_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = conn.execute(
-                f"SELECT * FROM messages WHERE body LIKE ? ESCAPE '\\' {like_sender_clause}"
+                f"SELECT * FROM messages WHERE body LIKE ? ESCAPE '\\' {like_filter_clause}"
                 " ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                [f"%{like_query}%"] + sender_args + [limit, offset],
+                [f"%{like_query}%"] + filter_args + [limit, offset],
             ).fetchall()
         return _rows_to_messages(conn, rows)
 

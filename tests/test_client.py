@@ -1757,3 +1757,14 @@ async def test_receive_sync_edit_message_updates_store(client):
     rows = _store_mod.search_messages("after edit")
     assert len(rows) == 1
     assert rows[0].body == "after edit"
+
+
+@pytest.mark.asyncio
+async def test_search_messages_passes_date_range(client):
+    """search_messages must forward since/until to the store."""
+    from datetime import datetime
+    from unittest.mock import patch
+    since, until = datetime(2024, 1, 1), datetime(2024, 2, 1)
+    with patch("signal_mcp.client._store.search_messages", return_value=[]) as mock_search:
+        await client.search_messages("q", since=since, until=until)
+    mock_search.assert_called_once_with("q", limit=50, offset=0, sender=None, since=since, until=until)

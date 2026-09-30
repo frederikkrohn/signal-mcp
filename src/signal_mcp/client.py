@@ -1023,9 +1023,13 @@ class SignalClient:
         return messages
 
     async def search_messages(
-        self, query: str, limit: int = 50, offset: int = 0, sender: str | None = None
+        self, query: str, limit: int = 50, offset: int = 0, sender: str | None = None,
+        since: datetime | None = None, until: datetime | None = None,
     ) -> list[Message]:
-        return await asyncio.to_thread(_store.search_messages, query, limit=limit, offset=offset, sender=sender)
+        return await asyncio.to_thread(
+            _store.search_messages, query, limit=limit, offset=offset, sender=sender,
+            since=since, until=until,
+        )
 
     async def list_conversations(self) -> list[dict]:
         await self._ensure_caches()

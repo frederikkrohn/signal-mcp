@@ -432,6 +432,30 @@ def test_search_messages_like_fallback_sender_filter(monkeypatch):
     assert results[0].sender == "+1"
 
 
+def test_search_messages_date_range():
+    store.save_message(make_msg(id="d1", body="match early", ts=datetime(2024, 6, 1, 9, 0)))
+    store.save_message(make_msg(id="d2", body="match mid", ts=datetime(2024, 6, 2, 9, 0)))
+    store.save_message(make_msg(id="d3", body="match late", ts=datetime(2024, 6, 3, 9, 0)))
+    ids = lambda rs: sorted(m.id for m in rs)
+    assert ids(store.search_messages("match", since=datetime(2024, 6, 2))) == ["d2", "d3"]
+    assert ids(store.search_messages("match", until=datetime(2024, 6, 2))) == ["d1"]
+    # until is exclusive: a message exactly at the bound is excluded
+    assert ids(store.search_messages("match", since=datetime(2024, 6, 1, 9, 0),
+                                     until=datetime(2024, 6, 2, 9, 0))) == ["d1"]
+
+
+def test_search_messages_like_fallback_date_and_sender(monkeypatch):
+    """Date filters must also apply (unaliased) in the LIKE fallback branch."""
+    import signal_mcp.store as store_mod
+    store.save_message(make_msg(id="fd1", sender="+1", body="fallback x", ts=datetime(2024, 6, 1)))
+    store.save_message(make_msg(id="fd2", sender="+1", body="fallback x", ts=datetime(2024, 6, 5)))
+    store.save_message(make_msg(id="fd3", sender="+2", body="fallback x", ts=datetime(2024, 6, 5)))
+    monkeypatch.setattr(store_mod, "_safe_fts_query", lambda q: "INVALID FTS SYNTAX !!!@#")
+    results = store.search_messages("fallback", sender="+1", since=datetime(2024, 6, 3),
+                                    until=datetime(2024, 6, 6))
+    assert [m.id for m in results] == ["fd2"]
+
+
 def test_search_messages_like_fallback_wildcard_literal(monkeypatch):
     """LIKE fallback must escape % and _ so they match literally."""
     import signal_mcp.store as store_mod

@@ -260,6 +260,7 @@ TOOLS = [
             "Searches message bodies using SQLite FTS — results are ranked by relevance. "
             "Only messages in the local store are searchable; messages never received on this device are excluded. "
             "Use sender to narrow results to a specific conversation. "
+            "Use since and/or until (ISO 8601) to restrict to a time window, e.g. 'last week' or a specific day. "
             "Use limit and offset to paginate through large result sets. "
             "Use when looking for a specific message or topic across all Signal conversations. "
             "Do NOT use to browse a conversation chronologically — use get_conversation for that."
@@ -269,6 +270,8 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "Keyword or phrase to search for"},
                 "sender": {"type": "string", "description": "Filter results to messages from this phone number (E.164)"},
+                "since": {"type": "string", "description": "Only messages at or after this ISO datetime (e.g. 2024-01-01 or 2024-01-01T09:00:00)"},
+                "until": {"type": "string", "description": "Only messages strictly before this ISO datetime (exclusive; until=2024-01-02 includes all of Jan 1)"},
                 "limit": {"type": "integer", "description": "Maximum results to return (default 50)"},
                 "offset": {"type": "integer", "description": "Skip this many results for pagination (default 0)", "default": 0},
             },
@@ -1716,12 +1719,22 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             })
 
         elif name == "search_messages":
+            bounds: dict[str, datetime | None] = {}
+            for key in ("since", "until"):
+                bounds[key] = None
+                if arguments.get(key):
+                    try:
+                        bounds[key] = datetime.fromisoformat(arguments[key])
+                    except ValueError:
+                        return _err(f"Invalid {key} date: {arguments[key]}")
             await client._ensure_caches()
             messages = await client.search_messages(
                 arguments["query"],
                 limit=int(arguments.get("limit", 50)),
                 offset=int(arguments.get("offset", 0)),
                 sender=arguments.get("sender"),
+                since=bounds["since"],
+                until=bounds["until"],
             )
             return _ok([client._enrich_message(m) for m in messages])
 

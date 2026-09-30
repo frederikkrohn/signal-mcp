@@ -401,12 +401,27 @@ def unblock(number: str):
 @click.option("--sender", default=None, help="Restrict to messages from this phone number (E.164)")
 @click.option("--limit", default=50, show_default=True, help="Max results")
 @click.option("--offset", default=0, show_default=True, help="Skip this many results (pagination)")
+@click.option("--since", default=None, help="Only messages at or after this ISO datetime (e.g. 2024-01-01)")
+@click.option("--until", default=None, help="Only messages before this ISO datetime (exclusive)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def search(query: str, sender: str | None, limit: int, offset: int, as_json: bool):
+def search(query: str, sender: str | None, limit: int, offset: int,
+           since: str | None, until: str | None, as_json: bool):
     """Search recent messages for QUERY."""
+    from datetime import datetime as _dt
+    bounds = {}
+    for opt, value in (("since", since), ("until", until)):
+        try:
+            bounds[opt] = _dt.fromisoformat(value) if value else None
+        except ValueError:
+            click.echo(f"Error: invalid --{opt} date: {value!r}", err=True)
+            sys.exit(1)
+
     async def _run():
         async with SignalClient() as client:
-            messages = await client.search_messages(query, limit=limit, offset=offset, sender=sender)
+            messages = await client.search_messages(
+                query, limit=limit, offset=offset, sender=sender,
+                since=bounds["since"], until=bounds["until"],
+            )
             if not messages:
                 click.echo("No messages found.")
                 return

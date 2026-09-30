@@ -957,6 +957,28 @@ async def test_tool_search_messages_offset():
     assert len(data) == 1
 
 
+@pytest.mark.asyncio
+async def test_tool_search_messages_date_range():
+    import signal_mcp.store as _store_mod
+    from signal_mcp.models import Message
+    from datetime import datetime
+    _store_mod.init_db()
+    _store_mod.save_message(Message(id="dr1", sender="+1", body="trip plan",
+                                    timestamp=datetime(2024, 6, 1, 12, 0, 0)))
+    _store_mod.save_message(Message(id="dr2", sender="+1", body="trip update",
+                                    timestamp=datetime(2024, 6, 8, 12, 0, 0)))
+    result = await call_tool("search_messages",
+                             {"query": "trip", "since": "2024-06-05", "until": "2024-06-09"})
+    data = json.loads(result[0].text)
+    assert [m["body"] for m in data] == ["trip update"]
+
+
+@pytest.mark.asyncio
+async def test_tool_search_messages_invalid_since():
+    result = await call_tool("search_messages", {"query": "trip", "since": "yesterday"})
+    assert "Invalid since date" in result[0].text
+
+
 # ── react_to_message remove ───────────────────────────────────────────────────
 
 @respx.mock

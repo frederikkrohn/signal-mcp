@@ -260,7 +260,7 @@ write access to your real Signal account.
 |---|---|
 | `list_conversations` | All conversations ordered by most recent message. |
 | `get_conversation` | Message history with a contact or group. Supports `since`, `limit`, and `offset` for pagination. |
-| `search_messages` | Full-text search (FTS5) across all stored messages. Supports `sender`, `limit`, and `offset`. |
+| `search_messages` | Full-text search (FTS5) across all stored messages. Supports `sender`, `since`/`until` (ISO date range; `until` exclusive), `limit`, and `offset`. |
 | `store_stats` | Total message count, oldest and newest message dates. |
 | `mark_as_unread` | Mark one or more stored messages as unread. |
 | `get_user_status` | Check whether phone numbers are registered Signal users. |

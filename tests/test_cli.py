@@ -523,7 +523,8 @@ def test_search_with_sender(runner):
         result = runner.invoke(cli, ["search", "filtered", "--sender", "+11111111111"])
     assert result.exit_code == 0
     assert "filtered" in result.output
-    client.search_messages.assert_called_once_with("filtered", limit=50, offset=0, sender="+11111111111")
+    client.search_messages.assert_called_once_with("filtered", limit=50, offset=0, sender="+11111111111",
+                                                   since=None, until=None)
 
 
 def test_search_with_limit(runner):
@@ -531,7 +532,31 @@ def test_search_with_limit(runner):
     client.search_messages = AsyncMock(return_value=[])
     with patch("signal_mcp.cli.SignalClient", return_value=client):
         result = runner.invoke(cli, ["search", "x", "--limit", "10"])
-    client.search_messages.assert_called_once_with("x", limit=10, offset=0, sender=None)
+    client.search_messages.assert_called_once_with("x", limit=10, offset=0, sender=None,
+                                                   since=None, until=None)
+
+
+def test_search_with_date_range(runner):
+    from datetime import datetime
+    client = _mock_client()
+    client.search_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["search", "x", "--since", "2024-06-01", "--until", "2024-06-02T08:00:00"])
+    assert result.exit_code == 0
+    client.search_messages.assert_called_once_with(
+        "x", limit=50, offset=0, sender=None,
+        since=datetime(2024, 6, 1), until=datetime(2024, 6, 2, 8, 0, 0),
+    )
+
+
+def test_search_invalid_until(runner):
+    client = _mock_client()
+    client.search_messages = AsyncMock(return_value=[])
+    with patch("signal_mcp.cli.SignalClient", return_value=client):
+        result = runner.invoke(cli, ["search", "x", "--until", "not-a-date"])
+    assert result.exit_code == 1
+    assert "invalid --until" in result.output
+    client.search_messages.assert_not_called()
 
 
 # ── receive ───────────────────────────────────────────────────────────────────
