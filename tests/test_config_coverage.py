@@ -205,3 +205,79 @@ def test_clear_daemon_pid_safe_when_absent(monkeypatch, tmp_path):
     pid_file = tmp_path / "no_such_file.pid"
     monkeypatch.setattr(config_mod, "DAEMON_PID_FILE", pid_file)
     clear_daemon_pid()  # should not raise
+
+
+def test_get_webhook_url_raises_on_corrupt_config(monkeypatch, tmp_path):
+    """A corrupt webhook.json must raise, not be indistinguishable from 'no webhook'."""
+    webhook_file = tmp_path / "webhook.json"
+    webhook_file.write_text("{not valid json")
+    monkeypatch.setattr(config_mod, "WEBHOOK_CONFIG_FILE", webhook_file)
+    monkeypatch.delenv("SIGNAL_MCP_WEBHOOK", raising=False)
+    with pytest.raises(RuntimeError, match="corrupt"):
+        config_mod.get_webhook_url()
+
+
+# ── validate_send_path (SIGNAL_MCP_SEND_ROOTS allowlist) ──────────────────────
+
+def test_validate_send_path_allows_attachment_dir(monkeypatch, tmp_path):
+    root = tmp_path / "attachments"
+    root.mkdir()
+    target = root / "photo.jpg"
+    target.write_bytes(b"x")
+    monkeypatch.setattr(config_mod, "SEND_ROOTS", [root])
+    result = config_mod.validate_send_path(str(target))
+    assert result == target.resolve()
+
+
+def test_validate_send_path_rejects_outside_allowlist(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside" / "secret.txt"
+    outside.parent.mkdir()
+    outside.write_text("x")
+    monkeypatch.setattr(config_mod, "SEND_ROOTS", [allowed])
+    with pytest.raises(ValueError, match="outside the allowed folders"):
+        config_mod.validate_send_path(str(outside))
+
+
+def test_validate_send_path_rejects_hidden_file(monkeypatch, tmp_path):
+    root = tmp_path / "home"
+    root.mkdir()
+    hidden = root / ".ssh" / "id_ed25519"
+    hidden.parent.mkdir()
+    hidden.write_text("x")
+    monkeypatch.setattr(config_mod, "SEND_ROOTS", [root])
+    with pytest.raises(ValueError, match="hidden"):
+        config_mod.validate_send_path(str(hidden))
+
+
+def test_validate_send_path_rejects_dotdot_escape(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+    monkeypatch.setattr(config_mod, "SEND_ROOTS", [allowed])
+    with pytest.raises(ValueError, match="outside the allowed folders"):
+        config_mod.validate_send_path(str(allowed / ".." / "outside.txt"))
+
+
+def test_send_roots_default_includes_attachment_dir(monkeypatch):
+    monkeypatch.delenv("SIGNAL_MCP_SEND_ROOTS", raising=False)
+    import importlib
+    reloaded = importlib.reload(config_mod)
+    try:
+        assert reloaded.ATTACHMENT_DIR in reloaded.SEND_ROOTS
+    finally:
+        importlib.reload(config_mod)  # restore real module state for later tests
+
+
+def test_send_roots_env_override(monkeypatch, tmp_path):
+    custom = tmp_path / "custom-send-root"
+    monkeypatch.setenv("SIGNAL_MCP_SEND_ROOTS", str(custom))
+    import importlib
+    reloaded = importlib.reload(config_mod)
+    try:
+        assert reloaded.SEND_ROOTS == [custom]
+    finally:
+        monkeypatch.delenv("SIGNAL_MCP_SEND_ROOTS", raising=False)
+        importlib.reload(config_mod)

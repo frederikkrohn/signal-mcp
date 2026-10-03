@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from datetime import datetime
 
 from mcp.server import Server, ServerRequestContext
@@ -22,6 +23,19 @@ from . import __version__, store as _store
 app = Server("signal-mcp", version=__version__)
 
 _client: SignalClient | None = None
+
+# Tools that only read/list/search/export existing state — no side effect on the
+# Signal account, contacts, groups, messages, files, or configuration.
+_READ_ONLY_TOOLS = {
+    "list_contacts", "list_groups", "get_conversation", "search_messages",
+    "get_profile", "get_own_number", "store_stats", "get_unread",
+    "list_conversations", "get_user_status", "list_identities", "export_messages",
+    "list_sticker_packs", "list_attachments", "get_attachment", "get_sticker",
+    "list_accounts", "get_webhook", "find_contact", "list_scheduled_messages",
+    "list_devices", "get_avatar", "receive_messages", "receive_direct",
+}
+
+_READONLY = os.environ.get("SIGNAL_MCP_READONLY", "").lower() in ("1", "true", "yes")
 
 # Tools that don't need the signal-cli daemon (read from local store only)
 _DAEMON_FREE = {
@@ -60,6 +74,15 @@ def _require(arguments: dict, *keys: str) -> str | None:
     if missing:
         return f"Missing required parameter(s): {', '.join(missing)}"
     return None
+
+
+def _paging(arguments: dict, default_limit: int = 50, max_limit: int = 500) -> tuple[int, int]:
+    """Clamp limit/offset from tool arguments. A negative SQLite LIMIT means
+    "no limit", so an unclamped value here would let a bad limit remove the
+    cap entirely and return the whole store in one response."""
+    limit = max(1, min(int(arguments.get("limit", default_limit)), max_limit))
+    offset = max(0, int(arguments.get("offset", 0)))
+    return limit, offset
 
 
 # ── Tool definitions ───────────────────────────────────────────────────────────
@@ -246,6 +269,7 @@ TOOLS = [
             "Searches message bodies using SQLite FTS — results are ranked by relevance. "
             "Only messages in the local store are searchable; messages never received on this device are excluded. "
             "Use sender to narrow results to a specific conversation. "
+            "Use since and/or until (ISO 8601) to restrict to a time window, e.g. 'last week' or a specific day. "
             "Use limit and offset to paginate through large result sets. "
             "Use when looking for a specific message or topic across all Signal conversations. "
             "Do NOT use to browse a conversation chronologically — use get_conversation for that."
@@ -255,6 +279,8 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "Keyword or phrase to search for"},
                 "sender": {"type": "string", "description": "Filter results to messages from this phone number (E.164)"},
+                "since": {"type": "string", "description": "Only messages at or after this ISO datetime (e.g. 2024-01-01 or 2024-01-01T09:00:00)"},
+                "until": {"type": "string", "description": "Only messages strictly before this ISO datetime (exclusive; until=2024-01-02 includes all of Jan 1)"},
                 "limit": {"type": "integer", "description": "Maximum results to return (default 50)"},
                 "offset": {"type": "integer", "description": "Skip this many results for pagination (default 0)", "default": 0},
             },
@@ -1497,22 +1523,33 @@ TOOLS += [
     ),
 ]
 
+_TOOL_NAMES = {t.name for t in TOOLS}
+
 
 async def _list_tools(ctx: ServerRequestContext, params: RequestParams) -> ListToolsResult:
+    if _READONLY:
+        return ListToolsResult(tools=[t for t in TOOLS if t.name in _READ_ONLY_TOOLS])
     return ListToolsResult(tools=TOOLS)
 
 
 async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
     name = params.name
     arguments = params.arguments or {}
+
+    # Validate the tool exists and has its required parameters BEFORE touching the
+    # daemon. Previously ensure_daemon() ran first, so an unknown tool name or a
+    # missing argument reported "daemon failed to start" instead of the real problem
+    # whenever the daemon itself couldn't start — masking the actual error.
+    if name not in _TOOL_NAMES:
+        return _err(f"Unknown tool: {name}")
+
+    if _READONLY and name not in _READ_ONLY_TOOLS:
+        return _err("This server is running in read-only mode (SIGNAL_MCP_READONLY).")
+
     client = get_client()  # noqa: F841 — used throughout the giant match below
 
-    try:
-        if name not in _DAEMON_FREE:
-            await client.ensure_daemon()
-
-        # Validate required parameters up front (gives clean error instead of KeyError)
-        _REQUIRED: dict[str, list[str]] = {
+    # Required parameters, per tool (gives a clean error instead of KeyError)
+    _REQUIRED: dict[str, list[str]] = {
             "send_message":         ["recipient", "message"],
             "send_group_message":   ["group_id", "message"],
             "send_note_to_self":    ["message"],
@@ -1563,10 +1600,14 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             "finish_change_number":           ["number", "verification_code"],
             "submit_rate_limit_challenge":    ["challenge", "captcha"],
         }
-        if name in _REQUIRED:
-            err = _require(arguments, *_REQUIRED[name])
-            if err:
-                return _err(err)
+    if name in _REQUIRED:
+        err = _require(arguments, *_REQUIRED[name])
+        if err:
+            return _err(err)
+
+    try:
+        if name not in _DAEMON_FREE:
+            await client.ensure_daemon()
 
         if name == "send_message":
             result = await client.send_message(
@@ -1665,8 +1706,7 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
                     since = datetime.fromisoformat(arguments["since"])
                 except ValueError:
                     return _err(f"Invalid since date: {arguments['since']}")
-            limit = int(arguments.get("limit", 50))
-            offset = int(arguments.get("offset", 0))
+            limit, offset = _paging(arguments)
             await client._ensure_caches()
             messages, total = await asyncio.gather(
                 client.get_conversation(
@@ -1687,12 +1727,23 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
             })
 
         elif name == "search_messages":
+            bounds: dict[str, datetime | None] = {}
+            for key in ("since", "until"):
+                bounds[key] = None
+                if arguments.get(key):
+                    try:
+                        bounds[key] = datetime.fromisoformat(arguments[key])
+                    except ValueError:
+                        return _err(f"Invalid {key} date: {arguments[key]}")
+            limit, offset = _paging(arguments)
             await client._ensure_caches()
             messages = await client.search_messages(
                 arguments["query"],
-                limit=int(arguments.get("limit", 50)),
-                offset=int(arguments.get("offset", 0)),
+                limit=limit,
+                offset=offset,
                 sender=arguments.get("sender"),
+                since=bounds["since"],
+                until=bounds["until"],
             )
             return _ok([client._enrich_message(m) for m in messages])
 
@@ -1791,7 +1842,7 @@ async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) ->
         elif name == "get_unread":
             await client._ensure_caches()
             warning = await _freshen_store(client)
-            limit = int(arguments.get("limit", 50))
+            limit, _ = _paging(arguments)
             # Fetch one extra to detect whether more exist without a COUNT query
             messages = await client.get_unread_messages(limit=limit + 1)
             has_more = len(messages) > limit

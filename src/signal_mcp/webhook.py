@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _WEBHOOK_TIMEOUT = 10.0   # seconds
 _WEBHOOK_RETRIES = 2
+_WEBHOOK_MAX_CONCURRENCY = 10  # cap simultaneous outbound POSTs during a catch-up batch
 
 
 def _message_to_payload(msg: Message) -> dict:
@@ -68,8 +69,18 @@ async def post_webhook(url: str, msg: Message) -> bool:
 
 
 async def post_webhook_batch(url: str, messages: list[Message]) -> int:
-    """Post multiple messages to the webhook URL concurrently. Returns success count."""
+    """Post multiple messages to the webhook URL concurrently. Returns success count.
+
+    Concurrency is capped so a large catch-up batch (e.g. after being offline)
+    doesn't open hundreds of simultaneous outbound connections at once.
+    """
     if not messages:
         return 0
-    results = await asyncio.gather(*[post_webhook(url, m) for m in messages])
+    sem = asyncio.Semaphore(_WEBHOOK_MAX_CONCURRENCY)
+
+    async def _bounded(m: Message) -> bool:
+        async with sem:
+            return await post_webhook(url, m)
+
+    results = await asyncio.gather(*[_bounded(m) for m in messages])
     return sum(results)

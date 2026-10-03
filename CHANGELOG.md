@@ -2,6 +2,179 @@
 
 All notable changes to signal-mcp are documented here.
 
+## [1.39.0] — 2026-09-30
+
+### Added
+
+- **`search_messages` gained `since`/`until` date-range filtering** (also available as `--since`/`--until` on `signal-mcp search`). Works in both the full-text and fallback search paths. The most useful gap found after checking every signal-cli capability not yet wrapped — `sendStory` and call commands stay deliberately excluded (see README).
+
+### Fixed
+
+- **`send_attachment`, `send_group_attachment`, `update_profile`'s avatar, and `upload_sticker_pack` accepted any local file path with no restriction.** Since incoming message content is untrusted and reaches the AI client unmarked, a sender could talk the AI into sending back an arbitrary local file (e.g. "send me ~/.ssh/id_ed25519"). Added an allowlist of folders (`config.validate_send_path`, default: the attachments dir, `~/Downloads`, `~/Desktop`, `~/Documents`; override via `SIGNAL_MCP_SEND_ROOTS`), rejecting hidden files/folders and anything outside it.
+- **A negative `limit` on `get_conversation`/`search_messages`/`get_unread` removed SQLite's row cap entirely** (`LIMIT -1` means "no limit"). Now clamped to 1–500.
+- **`_conversation_where`'s direct-message clause forced a full scan of every direct message** before checking sender/recipient, bypassing their indexes. Rewritten as three independent branches so SQLite can use each index directly — measured ~50x faster on a 100k-message synthetic store.
+- **The `attachments` table had no index on `message_id`**, scanned by every message-enrichment call and the conversation/prune delete paths. Added.
+- **`tests/test_desktop.py`'s import-lock tests wrote to the real `~/.local/share/signal-mcp/desktop-import.lock`** on most tests rather than a `tmp_path`, risking a race with, or deleting the lock of, a real Desktop sync running on the machine. Added an autouse isolation fixture.
+
+### Testing
+
+- 734 tests, 98% coverage. Added coverage for the previously-untested scheduled-message send path and `receive_direct`'s line-parsing, plus 4 `cli.py` receive/watch fallback-path tests. Verified clean across 15 randomized test-order seeds, and re-confirmed (DAEMON_PORT pointed at an unreachable port) that nothing in the suite depends on a real daemon.
+
+## [1.38.9] — 2026-09-28
+
+### Fixed
+
+- **A wrong password or corrupted/truncated Signal Desktop `encryptedKey` raised a raw `cryptography` `ValueError`** instead of the clear `DesktopImportError` every other import failure uses. `_decrypt_key` now wraps AES/PKCS7 decryption accordingly.
+- **A `secret-tool` that never responds (e.g. stuck on an unanswered keyring-unlock prompt) escaped as a raw `subprocess.TimeoutExpired`.** `_require_linux_keyring_password` now catches it with a specific message.
+
+### Testing
+
+- `cli.py` coverage: 82% → 97% (set-webhook/get-webhook, find-contact, schedule-send/scheduled/cancel-scheduled/run-scheduled, the `install` wizard). Total project coverage: 93% → 97%, 715 tests.
+- Found and fixed two more local-import-shadowing test bugs: `install()` re-imports `check_signal_cli_version` and `is_service_installed` from `.config` inside its own body, so patching `signal_mcp.cli.*` for them silently no-ops — one existing test was passing only by coincidence, because this machine's own background service happens to be installed.
+
+## [1.38.8] — 2026-09-28
+
+### Fixed
+
+- **On Linux, a `v10`-format Signal Desktop key could try the OS keyring password before the correct hardcoded `peanuts` password.** Signal Desktop only ever encrypts `v10` keys on Linux with `peanuts` — `v11` is the only keyring-backed format. A keyring entry left over from an unrelated app under the same label (`Signal Safe Storage` / `Electron Safe Storage`) would pick the wrong password and fail decryption for a `v10` key. Fixed at the source in `_get_keychain_password`; the `v11` path (`_require_linux_keyring_password`) was already correct and is unaffected. Also corrected a comment and error message that implied KWallet support — only libsecret-backed keyrings (via `secret-tool`) are supported.
+- **`tests/test_server.py` had real order-dependent test failures**, caused by a `reset_client` fixture that reset the local store but not the module-level contact/group caches or the daemon-alive/freshen cooldowns — several tests only passed because an earlier test happened to warm that state first. Fixed the fixture and the affected tests; verified clean across 29 randomized test-order seeds (5 previously failed).
+
+## [1.38.7] — 2026-09-28
+
+### Fixed
+
+- **`import-desktop` / `sync-desktop` failed on Linux with `Unknown encryptedKey format (prefix=b'v11')`** whenever Signal Desktop stores its key through a keyring (libsecret / KWallet). `_decrypt_key` only handled the macOS variant of Chromium's format: prefix `v10` and 1003 PBKDF2 iterations. Linux uses `v11` for keyring-backed keys and a single iteration, so the `v10` / `peanuts` fallback was affected too. Both prefixes are accepted now and the iteration count follows the platform. (#8)
+- **A missing `secret-tool` on Linux ended in an opaque decryption error.** The keyring lookup silently fell back to the hardcoded `peanuts` password, which can never decrypt a keyring-backed (`v11`) key. For `v11` keys the import now stops with a message that says whether `secret-tool` is missing or the keyring has no Signal entry. The `peanuts` fallback is unchanged for `v10` keys. (#8)
+- **The "sqlcipher not found" hint suggested `brew install sqlcipher` on every platform.** It now names the install command for the current platform. (#8)
+
+### Changed
+
+- `import-desktop` / `sync-desktop` print the "macOS may ask for Keychain access" note on macOS only, and the `import-desktop` help text no longer says it requires the macOS Keychain. README setup steps for the Desktop import now cover Linux. (#8)
+
+## [1.38.6] — 2026-09-25
+
+### Fixed
+
+- **The 1.38.4 daemon-PID fix only handled Ctrl+C (`KeyboardInterrupt`), not `SIGTERM`** — the actual signal `launchctl kickstart` and every LaunchAgent stop/restart sends. Python's default SIGTERM disposition kills the process without running `finally` blocks, so `clear_daemon_pid()` never fired on the realistic restart path, leaving the PID file stale or, after further daemon-lifecycle churn, pointing nowhere. Added an explicit SIGTERM handler. Verified against the real LaunchAgent with 3 consecutive `launchctl kickstart -k` restarts — the PID file matched the live process every time.
+
+## [1.38.5] — 2026-09-25
+
+### Performance
+
+- **Signal Desktop import committed to SQLite once per message** — a multi-thousand-message history did thousands of individual commits. Added `store.save_messages_batch` and switched the import loop to commit in chunks of 500, cutting import time for large histories.
+- **`webhook.post_webhook_batch` fired all outbound POSTs concurrently with no cap** — a large catch-up batch (e.g. after being offline) could open hundreds of simultaneous connections to the webhook endpoint at once. Capped concurrency to 10 in-flight requests via a semaphore.
+
+## [1.38.4] — 2026-09-25
+
+### Fixed
+
+- **`signal-mcp daemon` (the CLI command the LaunchAgent runs) never wrote the daemon PID file** — only the separate auto-spawn path in `client.py` did. `signal-mcp stop` and the stale-PID cleanup in `ensure_daemon` had no way to find or kill a daemon started this way. Now writes the PID on start and clears it on exit.
+
+## [1.38.3] — 2026-09-25
+
+### Fixed
+
+- **1.38.2's cache-refresh fix (narrowing `except Exception` to `except SignalError`) exposed an unwrapped `FileNotFoundError`** from `ensure_daemon`'s `subprocess.Popen` when `signal-cli` isn't on `PATH` — worked on a machine with signal-cli installed, broke CI and any environment without it. `ensure_daemon` now wraps a missing/unrunnable binary in `SignalError`. Caught by CI going red on the 1.38.2 release; verified locally by stripping `signal-cli` from `PATH`.
+
+## [1.38.2] — 2026-09-25
+
+### Fixed
+
+- **A 200 response from signal-cli's daemon can still carry per-recipient send failures** (e.g. `UNREGISTERED_FAILURE`, `IDENTITY_FAILURE`) nested in a `results` array — previously returned as if the send succeeded. `_rpc` now raises `SignalError` when it finds one.
+- **`receive_direct` never checked the signal-cli subprocess's exit code**, so a failed `receive` silently returned an empty/partial message list instead of raising.
+- **`_ensure_contact_cache`/`_ensure_group_cache` caught bare `Exception`**, meant to tolerate "daemon not up yet" but actually swallowing any bug in the cache-refresh path. Narrowed to `SignalError` so real bugs propagate instead of silently leaving the cache permanently unpopulated.
+- **Several RPC call sites** (`list_contacts`, `list_groups`, `list_sticker_packs`, `get_user_status`, `list_accounts`, `create_group`, `join_group`) **silently substituted an empty list/dict when signal-cli returned an unexpected shape**, which read to the caller as "you have no contacts/groups" instead of an error. Now raise `SignalError` naming the RPC method.
+- **`get_webhook_url` returned `None` for a corrupt/unreadable `webhook.json`**, indistinguishable from "no webhook configured". Now raises `RuntimeError`.
+
+Bugs identified via a diff against `faces-sh/signal-mcp`'s fork; fixed directly against our existing `SignalError`/`RuntimeError` types rather than adopting the fork's envelope architecture.
+
+### Added
+
+- **Read-only mode.** Set `SIGNAL_MCP_READONLY=1` to run the server with every state-mutating tool (send, edit, delete, react, group/account management, scheduling, desktop import, etc.) hidden from `list_tools` and rejected by `call_tool` if called directly. 24 read-only tools (contacts, groups, conversations, search, export, status) remain available.
+
+### Hardened
+
+- **Stale plaintext temp files are swept** at the start of every Desktop import — the only thing that can clean up after a `SIGKILL`, which no signal handler can catch.
+- **SIGTERM/SIGINT now delete the in-flight plaintext temp file** before the process exits (main-thread only, per Python's `signal` module constraints; the sweep above is the backstop for the background-thread case).
+- **A single-flight lock prevents two concurrent Desktop imports** from racing on the same local store.
+
+### Testing
+
+- `webhook.py` coverage: 39% → 100%.
+- 8 previously-untested MCP tool handlers (`set_webhook`, `get_webhook`, `find_contact`, `schedule_message`, `list_scheduled_messages`, `cancel_scheduled_message`, `run_scheduled_messages`, `submit_rate_limit_challenge`) now covered.
+- Fixed a long-standing order-dependent flaky test (`test_ensure_group_cache`) caused by unreset module-level cache state between tests.
+- Overall coverage: 88% → 92%, 664 tests passing.
+
+---
+
+## [1.38.1] — 2026-09-25
+
+### Fixed
+
+- **Desktop-imported replies never got a `quote_id`**, even though live-received replies already do. Signal Desktop keeps a reply's quote in the message's json blob; now extracted the same way other optional-schema columns already are.
+- **`_decrypt_db_to_temp` leaked a full plaintext copy of Signal message history to the shared system temp directory on any decrypt failure** (wrong key, timeout, non-zero exit, empty output) — never cleaned up. Now written to a private, `0700` app-owned directory (`~/.local/share/signal-mcp/tmp`) and unlinked on every failure path.
+
+Both credited to `Culper-Project/signal-mcp`'s analysis.
+
+---
+
+## [1.38.0] — 2026-09-25
+
+### Added
+
+- **Contact names now fall back to Signal Desktop's own conversation names** for people signal-cli's own contact list doesn't have a name for. Signal Desktop typically knows far more people by name than have been pushed into signal-cli — this data was already being captured during `import_desktop`/`sync_desktop`, just never read back. signal-cli's own name (including one set manually via `update_contact`) always wins; Desktop only fills gaps. Also fixes `_read_conversation_names` dropping every contact with no phone number on file — falls back to the conversation's serviceId. This is a manual-refresh feature: names reflect the last `import_desktop`/`sync_desktop` run.
+
+Idea credited to `faces-sh/signal-mcp`'s fork.
+
+---
+
+## [1.37.2] — 2026-09-25
+
+### Fixed
+
+- **`import_from_desktop` swallowed a failed own-number lookup**, permanently attributing every outgoing message's sender to the literal string `"me"` instead of the real account number. Now raises `DesktopImportError` with a clear message instead of silently corrupting the import.
+- **`call_tool` started the signal-cli daemon before validating that the tool name exists or has its required arguments**, so an unknown tool or a missing argument reported "daemon failed to start" whenever the daemon itself couldn't start — masking the real, cheaper-to-diagnose problem. Validation now runs first.
+
+Both surfaced while reviewing forks of this project — see `faces-sh/signal-mcp`'s uniform-error-envelope commit for the original analysis (its broader architecture wasn't adopted here, just these two fixes).
+
+---
+
+## [1.37.1] — 2026-09-25
+
+### Fixed
+
+- **Signal Desktop import split every direct conversation into two, and dropped the recipient on outgoing messages to contacts with no stored phone number.** `store.get_conversation` matches `sender = ? OR recipient = ?` against a single identifier, but incoming messages were keyed by the contact's uuid (Signal Desktop leaves `source` NULL and fills `sourceServiceId`) while outgoing messages were keyed by the conversation's e164 — a read by either identifier returned only half the conversation. Found independently by two forks of this project (`faces-sh/signal-mcp`, `Culper-Project/signal-mcp`) while diagnosing corrupted imported history; verified against this repo's own code before fixing. Both directions of a direct-conversation message now use the same identifier — the conversation's own e164, falling back to its serviceId for a contact with no phone number on file. Group messages are unaffected.
+
+---
+
+## [1.37.0] — 2026-09-22
+
+### Added
+
+- **`signal-mcp doctor`** — an onboarding smoke test that catches, in one run, the class of setup failures this project has hit in practice: signal-cli missing or too old, no account detected, daemon not running, `listDevices`/`receive` round-trips actually working (not just the port being open), and stale entries in signal-cli's `msg-cache` that can silently kill the receive thread on daemon startup. When the account has multiple linked devices, it also explains that only device 1 is primary and several write tools (`update_configuration`, `block_contact`, `set_pin`, `add_device`, ...) fail on any other device — signal-cli's JSON-RPC doesn't expose which device *this* instance is, so it can't check that automatically. Skips the direct receive probe (which would otherwise always fail) when the background watch service is installed and already holds signal-cli's receive lock. Exits non-zero if any check fails.
+
+---
+
+## [1.36.2] — 2026-09-21
+
+### Changed
+
+- **README:** `sendStory` (signal-cli 0.14.6) and `terminateGroup` (0.14.8) are now listed under "Not covered" as consciously not added — both are feasible, but stories have no use case yet and terminating a group is irreversible for every member. The section intro no longer claims everything listed there is infeasible. No code changes.
+
+---
+
+## [1.36.1] — 2026-09-21
+
+### Fixed
+
+- **`Dockerfile` could never build** — the signal-cli download step extracted `signal-cli-<ver>-Linux-native/bin/signal-cli`, but the `Linux-native` tarball contains only a single top-level `signal-cli` executable, so `tar` failed with "Not found in archive" (reproduced against the real 0.14.3 tarball). Now extracts `signal-cli` directly. Verified the extraction against the 0.14.8 tarball (x86-64 ELF); the Docker image itself was not built (no Docker daemon available). The native binary is x86-64 only.
+
+### Changed
+
+- **Bundled signal-cli bumped 0.14.3 → 0.14.8.** signal-cli's README notes that Signal's official clients expire after three months, after which the server can make incompatible changes; 0.14.3 (April) was past that.
+
+---
+
 ## [1.36.0] — 2026-09-04
 
 ### Fixed

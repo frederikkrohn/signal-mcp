@@ -1,12 +1,14 @@
 """Coverage tests for signal_mcp/server.py — uncovered lines."""
 
 import json
+import time as _time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import respx
 import httpx
 
+import signal_mcp.client as _client_mod
 import signal_mcp.store as _store_mod
 import signal_mcp.server as server_mod
 from signal_mcp.config import DAEMON_URL
@@ -30,6 +32,20 @@ def reset_server(monkeypatch, tmp_path):
         pass
 
     monkeypatch.setattr(test_client, "ensure_daemon", noop)
+
+    # Pre-warm the contact/group caches (empty) so _ensure_caches() never
+    # issues a real, unmocked RPC -- most tests here don't care about name
+    # resolution, and a cold cache would otherwise silently succeed against
+    # a real local daemon but hard-fail with none running (e.g. in CI).
+    monkeypatch.setattr(_client_mod, "_contact_cache", {})
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache", {})
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_daemon_last_ok_at", 0.0)
+    monkeypatch.setattr(server_mod, "_last_freshen_at", 0.0)
+
     return test_client
 
 
