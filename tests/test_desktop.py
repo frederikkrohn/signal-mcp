@@ -1,8 +1,10 @@
 """Tests for Signal Desktop importer."""
 
 import json
+import signal
 import sqlite3
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,9 +15,19 @@ from signal_mcp.desktop import (
     DesktopImportError,
     _decode_group_id,
     _decrypt_key,
+    _quote_id,
+    _read_conversation_names,
     _read_messages_from_plain_db,
     import_from_desktop,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_import_lock(tmp_path, monkeypatch):
+    """Keep import_from_desktop off the real ~/.local/share lock file: concurrent
+    pytest runs (or a live desktop sync) otherwise collide on it, and a test's
+    cleanup would delete a real sync's lock."""
+    monkeypatch.setattr("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", tmp_path / "desktop-import.lock")
 
 
 # ── Unit tests ─────────────────────────────────────────────────────────────────
@@ -41,6 +53,63 @@ def test_decode_group_id_valid():
 def test_decrypt_key_unknown_format():
     bad_hex = bytes(b"v99" + b"\x00" * 16).hex()
     with pytest.raises(DesktopImportError, match="Unknown encryptedKey format"):
+        _decrypt_key(bad_hex, b"password")
+
+
+def _encrypt_key_like_chromium(db_key_hex: str, password: bytes, prefix: bytes, iterations: int) -> str:
+    """Build an encryptedKey the way Chromium's OSCrypt does (test helper)."""
+    from cryptography.hazmat.primitives import hashes, padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA1(), length=16, salt=b"saltysalt", iterations=iterations)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(db_key_hex.encode()) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(kdf.derive(password)), modes.CBC(b"\x20" * 16)).encryptor()
+    return (prefix + encryptor.update(padded) + encryptor.finalize()).hex()
+
+
+@pytest.mark.parametrize(
+    "system, prefix, iterations, password",
+    [
+        ("Darwin", b"v10", 1003, b"keychain-password"),
+        ("Linux", b"v11", 1, b"keyring-password"),  # libsecret / KWallet
+        ("Linux", b"v10", 1, b"peanuts"),           # no keyring available
+    ],
+)
+def test_decrypt_key_roundtrip_per_platform(system, prefix, iterations, password):
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, password, prefix, iterations)
+    with patch("signal_mcp.desktop.platform.system", return_value=system):
+        assert _decrypt_key(encrypted, password) == db_key
+
+
+def test_decrypt_key_linux_does_not_use_macos_iterations():
+    """A key encrypted with macOS parameters must not decrypt to the DB key on Linux."""
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, b"pw", b"v11", 1003)
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"):
+        try:
+            result = _decrypt_key(encrypted, b"pw")
+        except DesktopImportError:
+            return  # wrong AES key → invalid padding, reported clearly
+    assert result != db_key
+
+
+def test_decrypt_key_wrong_password_raises_desktop_import_error():
+    """A wrong password must not surface as a raw cryptography ValueError."""
+    db_key = "3a0aaac0" * 8
+    encrypted = _encrypt_key_like_chromium(db_key, b"correct-password", b"v10", 1003)
+    with patch("signal_mcp.desktop.platform.system", return_value="Darwin"), \
+         pytest.raises(DesktopImportError, match="password is wrong"):
+        _decrypt_key(encrypted, b"wrong-password")
+
+
+def test_decrypt_key_truncated_ciphertext_raises_desktop_import_error():
+    """A truncated/corrupt ciphertext (not a multiple of the AES block size) must
+    not surface as a raw cryptography ValueError."""
+    bad_hex = (b"v10" + b"\x00" * 5).hex()  # 5 bytes: not block-aligned for AES-128
+    with pytest.raises(DesktopImportError, match="password is wrong|corrupted"):
         _decrypt_key(bad_hex, b"password")
 
 
@@ -154,6 +223,185 @@ def test_read_messages_timestamps(tmp_path):
     assert any(m.body == "Hallo" for m in messages)
 
 
+# ── _quote_id ─────────────────────────────────────────────────────────────────
+
+def test_quote_id_none_json():
+    assert _quote_id(None) is None
+
+
+def test_quote_id_no_quote_key():
+    assert _quote_id('{"body": "hi"}') is None
+
+
+def test_quote_id_invalid_json():
+    assert _quote_id("not json") is None
+
+
+def test_quote_id_extracts_sent_at():
+    assert _quote_id('{"quote": {"id": 1717243200000, "authorAci": "x"}}') == "1717243200000"
+
+
+def test_quote_id_rejects_non_numeric():
+    assert _quote_id('{"quote": {"id": "not-a-number"}}') is None
+    assert _quote_id('{"quote": {"id": true}}') is None
+    assert _quote_id('{"quote": "not-a-dict"}') is None
+
+
+def test_read_messages_sets_quote_id_from_json_column(tmp_path):
+    """A reply imported from Signal Desktop must be joinable back to the
+    message it quotes, the same way live-received replies already are."""
+    db_path = tmp_path / "quotes.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceUuid TEXT,
+        hasAttachments INTEGER, json TEXT
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', '+49222', NULL)")
+    conn.execute(
+        "INSERT INTO messages VALUES ('m1', 'c1', 'incoming', 'original', 1000, 1000, "
+        "'+49222', NULL, 0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO messages VALUES ('m2', 'c1', 'incoming', 'a reply', 2000, 2000, "
+        "'+49222', NULL, 0, '{\"quote\": {\"id\": 1000}}')"
+    )
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path)
+    by_body = {m.body: m for m in messages}
+    assert by_body["a reply"].quote_id == "1000"
+    assert by_body["original"].quote_id is None
+
+
+# ── _read_conversation_names ─────────────────────────────────────────────────
+
+def test_read_conversation_names_keys_direct_contact_by_e164(tmp_path):
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE conversations ADD COLUMN name TEXT")
+    conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT")
+    conn.execute("UPDATE conversations SET name = 'Alice', type = 'private' WHERE id = 'conv1'")
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db)
+    assert ("+49111", "Alice", "direct") in names
+
+
+def test_read_conversation_names_falls_back_to_service_id_without_e164(tmp_path):
+    """A contact with no phone number stored is still someone worth naming."""
+    db_path = tmp_path / "no-number.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, "
+        "groupId TEXT, type TEXT, name TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO conversations VALUES ('c1', NULL, 'uuid-only', NULL, 'private', 'Bob')"
+    )
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db_path)
+    assert ("uuid-only", "Bob", "direct") in names
+
+
+def test_read_conversation_names_group(tmp_path):
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE conversations ADD COLUMN name TEXT")
+    conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT")
+    conn.execute("UPDATE conversations SET name = 'Team', type = 'group' WHERE id = 'grp1'")
+    conn.commit()
+    conn.close()
+
+    names = _read_conversation_names(db)
+    assert ("group-abc", "Team", "group") in names
+
+
+def test_outgoing_direct_message_gets_a_recipient(tmp_path):
+    """An outgoing DM must record who it went to, or list_conversations/
+    get_conversation (which match on sender OR recipient) can never find it."""
+    db = _make_plain_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO messages VALUES ('m4', 'conv1', 'outgoing', 'see you then', "
+        "1717243500000, 1717243500000, NULL, NULL, 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+    messages = _read_messages_from_plain_db(db, own_number="+49111")
+    out = next(m for m in messages if m.body == "see you then")
+    assert out.recipient == "+49111"  # conv1's own e164 in the fixture
+
+
+def test_outgoing_direct_message_recipient_falls_back_to_service_id(tmp_path):
+    """A contact with no phone number stored is still one conversation."""
+    db_path = tmp_path / "no-number.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceServiceId TEXT, hasAttachments INTEGER
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', NULL, 'uuid-only', NULL)")
+    conn.execute("INSERT INTO messages VALUES ('out1', 'c1', 'outgoing', 'hi', 1000, 1000, NULL, NULL, 0)")
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path, own_number="+15550001")
+    assert messages[0].recipient == "uuid-only"
+
+
+def test_both_halves_of_a_direct_conversation_share_one_identifier(tmp_path):
+    """store.get_conversation matches sender = ? OR recipient = ? against a single
+    value. If incoming (keyed by the sender's uuid, since Signal Desktop leaves
+    `source` NULL and fills sourceServiceId) and outgoing (keyed by the
+    conversation's e164) use different identifiers, a read by either one returns
+    only half the conversation."""
+    db_path = tmp_path / "one-identity.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, e164 TEXT, serviceId TEXT, groupId TEXT)")
+    conn.execute("""CREATE TABLE messages (
+        id TEXT PRIMARY KEY, conversationId TEXT, type TEXT, body TEXT,
+        sent_at INTEGER, received_at INTEGER, source TEXT, sourceServiceId TEXT, hasAttachments INTEGER
+    )""")
+    conn.execute("INSERT INTO conversations VALUES ('c1', '+15550002', 'uuid-of-them', NULL)")
+    # source NULL + sourceServiceId set is exactly how Signal Desktop stores an incoming message.
+    conn.execute("INSERT INTO messages VALUES "
+                  "('in1', 'c1', 'incoming', 'how are you', 1000, 1000, NULL, 'uuid-of-them', 0)")
+    conn.execute("INSERT INTO messages VALUES "
+                  "('out1', 'c1', 'outgoing', 'all good', 2000, 2000, NULL, NULL, 0)")
+    conn.commit()
+    conn.close()
+
+    messages = _read_messages_from_plain_db(db_path, own_number="+15550001")
+    by_id = {m.id: m for m in messages}  # id scheme is str(ts_ms), matching live-received messages
+    identities = {by_id["1000"].sender, by_id["2000"].recipient}
+    assert identities == {"+15550002"}, f"both halves must name the other party the same way, got {identities}"
+
+
+def test_group_message_sender_is_still_the_member_not_the_group(tmp_path):
+    """The one-identifier fix must not leak into group messages — a group's
+    identity would otherwise name a member as "the group" instead of themselves."""
+    db = _make_plain_db(tmp_path)
+    messages = _read_messages_from_plain_db(db)
+    incoming_group = None
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO messages VALUES ('m5', 'grp1', 'incoming', 'hi all', "
+        "1717243600000, 1717243600000, NULL, 'member-uuid', 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+    messages = _read_messages_from_plain_db(db)
+    incoming_group = next(m for m in messages if m.body == "hi all")
+    assert incoming_group.sender == "member-uuid"
+
+
 # ── Integration-ish test (mocked) ───────────────────────────────────────────────
 
 @patch("signal_mcp.desktop.detect_account", return_value="+49111")
@@ -189,6 +437,7 @@ def test_import_from_desktop_success(
     msg = Message(id="m1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))
     mock_read.return_value = [msg]
     mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
 
     result = import_from_desktop()
 
@@ -266,6 +515,70 @@ def test_get_db_key_hex_macos_path(monkeypatch):
     mock_dk.assert_called_once()
 
 
+_V11_HEX = (b"v11" + b"\x00" * 16).hex()
+_V10_HEX = (b"v10" + b"\x00" * 16).hex()
+
+
+def test_get_db_key_hex_linux_v11_uses_keyring_password():
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch.object(_d, "_linux_keyring_password", return_value=b"keyring-pw"), \
+         patch.object(_d, "_decrypt_key", return_value="deadbeef" * 8) as mock_dk:
+        result = _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_called_once_with(_V11_HEX, b"keyring-pw")
+    assert result == "deadbeef" * 8
+
+
+def test_get_db_key_hex_linux_v11_without_secret_tool_names_the_package():
+    """v11 + no secret-tool must not fall back to 'peanuts' — it can never decrypt v11."""
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=FileNotFoundError), \
+         patch("signal_mcp.desktop.shutil.which", return_value=None), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="secret-tool is not installed") as exc:
+            _d._get_db_key_hex(_V11_HEX)
+    assert "libsecret-tools" in str(exc.value)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v11_without_keyring_entry():
+    from signal_mcp import desktop as _d
+    no_entry = MagicMock()
+    no_entry.return_value.returncode = 1
+    no_entry.return_value.stdout = ""
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", no_entry), \
+         patch("signal_mcp.desktop.shutil.which", return_value="/usr/bin/secret-tool"), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="found no Signal entry"):
+            _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v11_secret_tool_timeout():
+    """A secret-tool that never answers (e.g. stuck on an unlock prompt) must
+    surface as a clear DesktopImportError, not a raw subprocess.TimeoutExpired."""
+    import subprocess as _subprocess
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run",
+               side_effect=_subprocess.TimeoutExpired(cmd="secret-tool", timeout=10)), \
+         patch.object(_d, "_decrypt_key") as mock_dk:
+        with pytest.raises(DesktopImportError, match="did not respond in time"):
+            _d._get_db_key_hex(_V11_HEX)
+    mock_dk.assert_not_called()
+
+
+def test_get_db_key_hex_linux_v10_keeps_peanuts_fallback():
+    from signal_mcp import desktop as _d
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=FileNotFoundError), \
+         patch.object(_d, "_decrypt_key", return_value="deadbeef" * 8) as mock_dk:
+        _d._get_db_key_hex(_V10_HEX)
+    mock_dk.assert_called_once_with(_V10_HEX, b"peanuts")
+
+
 # ── Temp file cleanup on error ─────────────────────────────────────────────────
 
 @patch("signal_mcp.desktop.detect_account", return_value="+49111")
@@ -317,15 +630,14 @@ def test_linux_keychain_fallback_to_peanuts(monkeypatch):
     assert result == b"peanuts"
 
 
-def test_linux_keychain_secret_tool_success(monkeypatch):
-    """When secret-tool succeeds on Linux, its output is returned."""
-    from signal_mcp.desktop import _get_keychain_password
+def test_linux_keyring_password_application_lookup_success(monkeypatch):
+    """When secret-tool's application lookup succeeds on Linux, its output is returned."""
+    from signal_mcp.desktop import _linux_keyring_password
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = "my_secret\n"
-    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
-         patch("signal_mcp.desktop.subprocess.run", mock_run):
-        result = _get_keychain_password()
+    with patch("signal_mcp.desktop.subprocess.run", mock_run):
+        result = _linux_keyring_password()
     assert result == b"my_secret"
 
 
@@ -363,14 +675,11 @@ def test_get_keychain_password_darwin_all_fail(monkeypatch):
             _get_keychain_password()
 
 
-def test_get_keychain_password_linux_label_success(monkeypatch):
+def test_linux_keyring_password_label_lookup_success(monkeypatch):
     """Linux: second secret-tool lookup (by label) succeeds."""
-    from signal_mcp.desktop import _get_keychain_password
-
-    call_count = [0]
+    from signal_mcp.desktop import _linux_keyring_password
 
     def fake_run(cmd, **kwargs):
-        call_count[0] += 1
         result = MagicMock()
         # First call (lookup application) → fail; second (lookup label) → succeed
         if "application" in cmd:
@@ -381,10 +690,23 @@ def test_get_keychain_password_linux_label_success(monkeypatch):
             result.stdout = "labelpassword\n"
         return result
 
-    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
-         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
-        result = _get_keychain_password()
+    with patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
+        result = _linux_keyring_password()
     assert result == b"labelpassword"
+
+
+def test_get_keychain_password_linux_always_peanuts(monkeypatch):
+    """Linux: _get_keychain_password is only used for v10 keys, which Signal
+    Desktop always encrypts with this hardcoded password -- it must never try
+    the keyring, since an unrelated app's entry under the same label would
+    derive the wrong AES key (see _require_linux_keyring_password for v11)."""
+    from signal_mcp.desktop import _get_keychain_password
+
+    with patch("signal_mcp.desktop.platform.system", return_value="Linux"), \
+         patch("signal_mcp.desktop.subprocess.run") as mock_run:
+        result = _get_keychain_password()
+    assert result == b"peanuts"
+    mock_run.assert_not_called()
 
 
 def test_get_keychain_password_windows_raises():
@@ -439,7 +761,7 @@ def test_decrypt_dpapi_key_dpapi_success():
 
 
 def test_decrypt_key_valid_v10(monkeypatch):
-    """_decrypt_key decrypts a known v10-format test vector."""
+    """_decrypt_key decrypts a known v10-format test vector (macOS parameters)."""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes, padding as _pad
@@ -458,7 +780,8 @@ def test_decrypt_key_valid_v10(monkeypatch):
     ciphertext = encryptor.update(padded) + encryptor.finalize()
     encrypted_hex = (b"v10" + ciphertext).hex()
 
-    result = _decrypt_key(encrypted_hex, password)
+    with patch("signal_mcp.desktop.platform.system", return_value="Darwin"):
+        result = _decrypt_key(encrypted_hex, password)
     assert result == plaintext.hex()
 
 
@@ -495,6 +818,28 @@ def test_find_sqlcipher_not_found():
             _find_sqlcipher()
 
 
+@pytest.mark.parametrize(
+    "system, expected, unexpected",
+    [
+        ("Darwin", "brew install sqlcipher", "apt"),
+        ("Linux", "sudo apt install sqlcipher", "brew"),
+        ("FreeBSD", "on your PATH", "brew"),
+    ],
+)
+def test_find_sqlcipher_not_found_hint_matches_platform(system, expected, unexpected):
+    from signal_mcp.desktop import _find_sqlcipher, DesktopImportError
+    which_result = MagicMock()
+    which_result.returncode = 1
+    which_result.stdout = ""
+    with patch("signal_mcp.desktop.Path.exists", return_value=False), \
+         patch("signal_mcp.desktop.subprocess.run", return_value=which_result), \
+         patch("signal_mcp.desktop.platform.system", return_value=system):
+        with pytest.raises(DesktopImportError, match="sqlcipher not found") as exc:
+            _find_sqlcipher()
+    assert expected in str(exc.value)
+    assert unexpected not in str(exc.value)
+
+
 def test_decrypt_db_to_temp_success(tmp_path):
     """_decrypt_db_to_temp returns a path to decrypted DB on success."""
     from signal_mcp.desktop import _decrypt_db_to_temp
@@ -517,7 +862,8 @@ def test_decrypt_db_to_temp_success(tmp_path):
         return r
 
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run):
+         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "plaintext-tmp"):
         result = _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
 
     assert result.exists()
@@ -534,10 +880,61 @@ def test_decrypt_db_to_temp_sqlcipher_fails(tmp_path):
     fail_result = MagicMock()
     fail_result.returncode = 1
     fail_result.stderr = "cipher error"
+    tmp_dir = tmp_path / "plaintext-tmp"
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", return_value=fail_result):
+         patch("signal_mcp.desktop.subprocess.run", return_value=fail_result), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
         with pytest.raises(DesktopImportError, match="sqlcipher failed"):
             _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+    # A failed export must never leave the plaintext temp file behind.
+    assert list(tmp_dir.iterdir()) == []
+
+
+def test_decrypt_db_to_temp_cleans_up_on_subprocess_exception(tmp_path):
+    """A subprocess.run exception (e.g. timeout) must not leave the plaintext
+    temp file behind either — only the sqlcipher-failure paths did before."""
+    from signal_mcp.desktop import _decrypt_db_to_temp
+
+    fake_db = tmp_path / "db.sqlite"
+    fake_db.write_bytes(b"encrypted")
+    tmp_dir = tmp_path / "plaintext-tmp"
+
+    with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=TimeoutError("boom")), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
+        with pytest.raises(TimeoutError):
+            _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+    assert list(tmp_dir.iterdir()) == []
+
+
+def test_decrypt_db_to_temp_uses_a_private_directory(tmp_path):
+    """The plaintext export directory must be created 0700 — it holds a full
+    plaintext copy of the user's Signal message history."""
+    from signal_mcp.desktop import _decrypt_db_to_temp
+    import stat
+
+    fake_db = tmp_path / "db.sqlite"
+    fake_db.write_bytes(b"encrypted")
+    tmp_dir = tmp_path / "plaintext-tmp"
+
+    def fake_run(cmd, input=None, **kwargs):
+        for line in (input or "").splitlines():
+            if "ATTACH DATABASE" in line and "AS plaintext" in line:
+                start = line.index("'") + 1
+                end = line.index("'", start)
+                Path(line[start:end]).write_bytes(b"plain sqlite data")
+        r = MagicMock()
+        r.returncode = 0
+        r.stderr = ""
+        return r
+
+    with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
+         patch("signal_mcp.desktop.subprocess.run", side_effect=fake_run), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_dir):
+        result = _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
+
+    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+    result.unlink(missing_ok=True)
 
 
 def test_decrypt_db_to_temp_empty_output(tmp_path):
@@ -552,7 +949,8 @@ def test_decrypt_db_to_temp_empty_output(tmp_path):
     ok_result.stderr = ""
     # Don't create the temp file → empty output condition
     with patch("signal_mcp.desktop._find_sqlcipher", return_value="/usr/bin/sqlcipher"), \
-         patch("signal_mcp.desktop.subprocess.run", return_value=ok_result):
+         patch("signal_mcp.desktop.subprocess.run", return_value=ok_result), \
+         patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "plaintext-tmp"):
         with pytest.raises(DesktopImportError, match="empty output"):
             _decrypt_db_to_temp("aabbccdd" * 8, fake_db)
 
@@ -608,6 +1006,7 @@ def test_import_from_desktop_with_signal_dir_override(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         result = import_from_desktop(signal_dir=signal_dir)
 
     assert result["imported"] == 1
@@ -656,12 +1055,13 @@ def test_import_progress_callbacks(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Keychain" in m or "macOS" in m for m in messages_logged), messages_logged
     assert any("Decrypting" in m for m in messages_logged)
     assert any("Importing" in m for m in messages_logged)
-    assert any("0/" in m for m in messages_logged)  # i=0 progress tick
+    assert any("/1 messages" in m for m in messages_logged)  # chunk progress tick
 
 
 def test_import_progress_linux(tmp_path):
@@ -682,6 +1082,7 @@ def test_import_progress_linux(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Linux" in m or "libsecret" in m for m in messages_logged)
@@ -705,33 +1106,28 @@ def test_import_progress_other_platform(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         import_from_desktop(signal_dir=signal_dir, progress_cb=messages_logged.append)
 
     assert any("Decrypting" in m for m in messages_logged)
 
 
 def test_import_detect_account_failure(tmp_path):
-    """import_from_desktop uses empty own_number when detect_account raises."""
+    """import_from_desktop raises instead of silently falling back to own_number="" —
+    a silent fallback would permanently misattribute every outgoing message's sender
+    to the literal string "me" (see _read_messages_from_plain_db)."""
     signal_dir = _make_signal_dir(tmp_path)
 
-    from signal_mcp.desktop import import_from_desktop
-    from signal_mcp.models import Message
+    from signal_mcp.desktop import import_from_desktop, DesktopImportError
     fake_plain = tmp_path / "plain_acct.db"
     fake_plain.write_bytes(b"x")
-    msg = Message(id="a1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))
 
     with patch("signal_mcp.desktop._get_db_key_hex", return_value="aa" * 32), \
          patch("signal_mcp.desktop._decrypt_db_to_temp", return_value=fake_plain), \
-         patch("signal_mcp.desktop._read_messages_from_plain_db", return_value=[msg]) as mock_read, \
-         patch("signal_mcp.desktop._store") as mock_store, \
+         patch("signal_mcp.desktop._store"), \
          patch("signal_mcp.desktop.detect_account", side_effect=RuntimeError("no account")):
-        mock_store.save_message.return_value = True
-        result = import_from_desktop(signal_dir=signal_dir)
-
-    # Should succeed with own_number="" (outgoing messages attributed to "me")
-    assert result["total"] == 1
-    # _read_messages_from_plain_db called with own_number=""
-    mock_read.assert_called_once_with(fake_plain, own_number="", since_ms=0)
+        with pytest.raises(DesktopImportError, match="Could not detect your Signal account"):
+            import_from_desktop(signal_dir=signal_dir)
 
 
 def test_import_skipped_count(tmp_path):
@@ -749,7 +1145,8 @@ def test_import_skipped_count(tmp_path):
          patch("signal_mcp.desktop._read_messages_from_plain_db", return_value=[msg]), \
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49test"):
-        mock_store.save_message.return_value = False  # duplicate → skip
+        mock_store.save_message.return_value = False
+        mock_store.save_messages_batch.return_value = (0, 1)
         result = import_from_desktop(signal_dir=signal_dir)
 
     assert result["skipped"] == 1
@@ -815,6 +1212,7 @@ def test_import_from_desktop_passes_since_ms(tmp_path):
          patch("signal_mcp.desktop._store") as mock_store, \
          patch("signal_mcp.desktop.detect_account", return_value="+49"):
         mock_store.save_message.return_value = True
+        mock_store.save_messages_batch.return_value = (1, 0)
         from signal_mcp.desktop import import_from_desktop
         import_from_desktop(signal_dir=signal_dir, since_ms=123456789)
 
@@ -842,6 +1240,7 @@ def _make_sync_patches(tmp_path, messages=None, *, last_sync=None):
     mock_store = MagicMock()
     mock_store.get_meta.return_value = last_sync
     mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
     stack.enter_context(patch("signal_mcp.desktop._store", mock_store))
     stack.enter_context(patch("signal_mcp.desktop.detect_account", return_value="+49"))
     return stack, signal_dir, mock_store
@@ -1106,3 +1505,173 @@ def test_read_messages_zero_timestamp_after_since_filter(tmp_path):
     msgs = _read_messages_from_plain_db(db_path, since_ms=-1)
     # The Python guard `if not ts_ms: continue` kicks in and skips the row
     assert msgs == []
+
+
+# ── Stale plaintext file sweep ──────────────────────────────────────────────────
+
+def test_sweep_removes_only_stale_files(tmp_path):
+    """Files older than the threshold are deleted; fresh files are left alone."""
+    import os as _os
+    from signal_mcp.desktop import _sweep_stale_plaintext_files
+
+    plaintext_dir = tmp_path / "plaintext-tmp"
+    plaintext_dir.mkdir()
+    old_file = plaintext_dir / "orphaned.db"
+    old_file.write_bytes(b"leftover")
+    fresh_file = plaintext_dir / "fresh.db"
+    fresh_file.write_bytes(b"current")
+
+    now = time.time()
+    _os.utime(old_file, (now - 7200, now - 7200))  # 2 hours old
+    _os.utime(fresh_file, (now, now))
+
+    with patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", plaintext_dir):
+        _sweep_stale_plaintext_files()
+
+    assert not old_file.exists()
+    assert fresh_file.exists()
+
+
+def test_sweep_noop_when_dir_missing(tmp_path):
+    from signal_mcp.desktop import _sweep_stale_plaintext_files
+
+    with patch("signal_mcp.desktop._PLAINTEXT_TMP_DIR", tmp_path / "does-not-exist"):
+        _sweep_stale_plaintext_files()  # must not raise
+
+
+# ── SIGTERM/SIGINT cleanup handler ──────────────────────────────────────────────
+
+def test_termination_handler_deletes_active_plain_db(tmp_path):
+    """The registered handler deletes the in-flight plaintext file before
+    resuming default signal behavior. True signal delivery isn't practical to
+    test in pytest, so this calls the handler function directly and stubs
+    os.kill to avoid actually terminating the test process."""
+    import signal_mcp.desktop as _desktop
+
+    plain_db = tmp_path / "plain.db"
+    plain_db.write_bytes(b"data")
+    _desktop._active_plain_db = plain_db
+
+    with patch("signal_mcp.desktop.os.kill") as mock_kill, \
+         patch("signal_mcp.desktop.signal.signal") as mock_signal:
+        _desktop._handle_termination_signal(signal.SIGTERM, None)
+
+    assert not plain_db.exists()
+    mock_signal.assert_called_once_with(signal.SIGTERM, signal.SIG_DFL)
+    mock_kill.assert_called_once()
+    _desktop._active_plain_db = None
+
+
+def test_termination_handler_noop_without_active_plain_db():
+    import signal_mcp.desktop as _desktop
+
+    _desktop._active_plain_db = None
+    with patch("signal_mcp.desktop.os.kill"), patch("signal_mcp.desktop.signal.signal"):
+        _desktop._handle_termination_signal(signal.SIGINT, None)  # must not raise
+
+
+# ── Single-flight lock against concurrent Desktop imports ──────────────────────
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._read_messages_from_plain_db")
+@patch("signal_mcp.desktop._store")
+def test_import_raises_when_lock_already_held(
+    mock_store, mock_read, mock_decrypt_db, mock_decrypt_key, mock_keychain,
+    mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    lock_file = tmp_path / "desktop-import.lock"
+    lock_file.write_text("99999")  # fake PID held by "another process"
+
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file), \
+             pytest.raises(DesktopImportError, match="already in progress"):
+            import_from_desktop()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg
+
+    mock_decrypt_db.assert_not_called()
+
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._read_messages_from_plain_db")
+@patch("signal_mcp.desktop._store")
+def test_import_releases_lock_after_success(
+    mock_store, mock_read, mock_decrypt_db, mock_decrypt_key, mock_keychain,
+    mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+    from signal_mcp.models import Message
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    mock_decrypt_key.return_value = "aabbccdd" * 4
+    fake_plain = tmp_path / "plain.db"
+    fake_plain.write_bytes(b"x")
+    mock_decrypt_db.return_value = fake_plain
+    mock_read.return_value = [Message(id="m1", sender="+1", body="hi", timestamp=datetime(2024, 1, 1))]
+    mock_store.save_message.return_value = True
+    mock_store.save_messages_batch.return_value = (1, 0)
+
+    lock_file = tmp_path / "desktop-import.lock"
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file):
+            import_from_desktop()
+            assert not lock_file.exists()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg
+
+
+@patch("signal_mcp.desktop.detect_account", return_value="+49111")
+@patch("signal_mcp.desktop._get_keychain_password")
+@patch("signal_mcp.desktop._decrypt_key")
+@patch("signal_mcp.desktop._decrypt_db_to_temp")
+@patch("signal_mcp.desktop._store")
+def test_import_releases_lock_after_failure(
+    mock_store, mock_decrypt_db, mock_decrypt_key, mock_keychain, mock_detect, tmp_path
+):
+    from signal_mcp import desktop as _d
+
+    signal_dir = tmp_path / "Signal"
+    (signal_dir / "sql").mkdir(parents=True)
+    (signal_dir / "sql" / "db.sqlite").write_bytes(b"fake")
+    config = {"encryptedKey": "76313000" + "00" * 16}
+    (signal_dir / "config.json").write_text(json.dumps(config))
+    original_db, original_cfg = _d.SIGNAL_DB, _d.SIGNAL_CONFIG
+    _d.SIGNAL_DB = signal_dir / "sql" / "db.sqlite"
+    _d.SIGNAL_CONFIG = signal_dir / "config.json"
+
+    mock_decrypt_key.return_value = "aabbccdd" * 4
+    mock_decrypt_db.side_effect = DesktopImportError("sqlcipher failed: boom")
+
+    lock_file = tmp_path / "desktop-import.lock"
+    try:
+        with patch("signal_mcp.desktop.DESKTOP_IMPORT_LOCK_FILE", lock_file):
+            with pytest.raises(DesktopImportError, match="sqlcipher failed"):
+                import_from_desktop()
+            assert not lock_file.exists()
+    finally:
+        _d.SIGNAL_DB, _d.SIGNAL_CONFIG = original_db, original_cfg

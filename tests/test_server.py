@@ -8,9 +8,12 @@ import pytest
 import respx
 import httpx
 
+import signal_mcp.client as _client_mod
+import signal_mcp.config as _config_mod
+import signal_mcp.server as _server_mod
 import signal_mcp.store as _store_mod
 from signal_mcp.config import DAEMON_URL
-from signal_mcp.models import Message
+from signal_mcp.models import Contact, Message
 from tests.conftest import call_tool
 from signal_mcp.client import SignalClient
 
@@ -33,6 +36,29 @@ def reset_client(monkeypatch, tmp_path):
     async def noop(): pass
     monkeypatch.setattr(test_client, "ensure_daemon", noop)
     return test_client
+
+
+@pytest.fixture(autouse=True)
+def reset_caches(monkeypatch):
+    # Module-level caches that leak between tests if not reset -- without
+    # this, a test can pass only because an earlier test happened to warm
+    # the contact/group cache or the freshen/daemon-alive cooldowns first.
+    #
+    # Default to *pre-warmed empty* rather than cold/unloaded: most tests in
+    # this file don't care about contact/group name resolution and never
+    # mock listContacts/listGroups, so a cold cache makes _ensure_caches()
+    # issue a real, unmocked RPC -- which silently succeeded locally against
+    # a real running daemon but hard-fails in CI with no daemon at all. Tests
+    # that specifically exercise the cache-loading path set these explicitly.
+    import time as _time
+    monkeypatch.setattr(_client_mod, "_contact_cache", {})
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache", {})
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_daemon_last_ok_at", 0.0)
+    monkeypatch.setattr(_server_mod, "_last_freshen_at", 0.0)
 
 
 @respx.mock
@@ -63,6 +89,25 @@ async def test_tool_list_groups_empty():
 async def test_tool_unknown():
     result = await call_tool("nonexistent_tool", {})
     assert "Unknown tool" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_and_missing_param_never_touch_the_daemon(reset_client):
+    """An unknown tool name or a missing required argument must be rejected before
+    ensure_daemon() runs — otherwise a daemon that fails to start reports 'daemon
+    failed to start' for these instead of the real, cheaper-to-diagnose problem."""
+    spy = MagicMock()
+    async def tracked_ensure_daemon(*a, **kw):
+        spy()
+    reset_client.ensure_daemon = tracked_ensure_daemon
+
+    result = await call_tool("nonexistent_tool", {})
+    assert "Unknown tool" in result[0].text
+    spy.assert_not_called()
+
+    result = await call_tool("send_message", {"recipient": "+19999999999"})  # missing "message"
+    assert "Missing required parameter" in result[0].text
+    spy.assert_not_called()
 
 
 @respx.mock
@@ -912,6 +957,28 @@ async def test_tool_search_messages_offset():
     assert len(data) == 1
 
 
+@pytest.mark.asyncio
+async def test_tool_search_messages_date_range():
+    import signal_mcp.store as _store_mod
+    from signal_mcp.models import Message
+    from datetime import datetime
+    _store_mod.init_db()
+    _store_mod.save_message(Message(id="dr1", sender="+1", body="trip plan",
+                                    timestamp=datetime(2024, 6, 1, 12, 0, 0)))
+    _store_mod.save_message(Message(id="dr2", sender="+1", body="trip update",
+                                    timestamp=datetime(2024, 6, 8, 12, 0, 0)))
+    result = await call_tool("search_messages",
+                             {"query": "trip", "since": "2024-06-05", "until": "2024-06-09"})
+    data = json.loads(result[0].text)
+    assert [m["body"] for m in data] == ["trip update"]
+
+
+@pytest.mark.asyncio
+async def test_tool_search_messages_invalid_since():
+    result = await call_tool("search_messages", {"query": "trip", "since": "yesterday"})
+    assert "Invalid since date" in result[0].text
+
+
 # ── react_to_message remove ───────────────────────────────────────────────────
 
 @respx.mock
@@ -1301,9 +1368,15 @@ async def test_tool_remove_pin():
 @respx.mock
 @pytest.mark.asyncio
 async def test_tool_receive_messages_service_conflict_falls_back(monkeypatch):
+    import time as _time
     from signal_mcp.models import Message
     from datetime import datetime
     import signal_mcp.server as _srv
+
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
 
     # Simulate "already being received" error from daemon
     async def _fail_receive(*a, **kw):
@@ -1330,6 +1403,10 @@ async def test_freshen_store_cooldown_skips_poll(monkeypatch):
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: False)
     # Set last freshen to "just now" so cooldown is active
     monkeypatch.setattr(_srv, "_last_freshen_at", time.monotonic())
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", time.monotonic())
     # No respx route — if receive_messages is called it will fail
     result = await call_tool("get_unread", {})
     data = json.loads(result[0].text)
@@ -1341,9 +1418,16 @@ async def test_freshen_store_cooldown_skips_poll(monkeypatch):
 @pytest.mark.asyncio
 async def test_freshen_store_swallows_receive_exception(monkeypatch):
     """_freshen_store must not propagate exceptions from receive_messages."""
+    import time as _time
     import signal_mcp.server as _srv
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: False)
     monkeypatch.setattr(_srv, "_last_freshen_at", 0.0)
+    # Pre-warm the contact/group caches so _ensure_caches() makes no RPC call --
+    # this test is about receive_messages's exception being swallowed, not caching.
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     # Simulate receive_messages failing (connection error)
     respx.post(DAEMON_URL).mock(side_effect=Exception("daemon gone"))
     result = await call_tool("get_unread", {})
@@ -1371,7 +1455,14 @@ async def test_get_unread_no_service_includes_warning(monkeypatch):
 @respx.mock
 @pytest.mark.asyncio
 async def test_get_unread_with_service_no_warning(monkeypatch):
+    import time as _time
     monkeypatch.setattr("signal_mcp.server.is_service_installed", lambda: True)
+    # Pre-warm the contact/group caches so _ensure_caches() makes no RPC call --
+    # this test is about the _warning field, not caching.
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     result = await call_tool("get_unread", {})
     data = json.loads(result[0].text)
     assert "_warning" not in data
@@ -1520,8 +1611,13 @@ async def test_get_unread_has_more_false_when_exact_limit():
 # Bug 5: dead mark_as_read block in get_conversation — verify no double-marking
 @respx.mock
 @pytest.mark.asyncio
-async def test_get_conversation_marks_incoming_as_read():
+async def test_get_conversation_marks_incoming_as_read(monkeypatch):
     """get_conversation must mark incoming messages as read exactly once."""
+    import time as _time
+    monkeypatch.setattr(_client_mod, "_contact_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_contact_cache_at", _time.monotonic())
+    monkeypatch.setattr(_client_mod, "_group_cache_loaded", True)
+    monkeypatch.setattr(_client_mod, "_group_cache_at", _time.monotonic())
     _store_mod.init_db()
     _store_mod.save_message(Message(
         id="cv_in1", sender="+12223334444", body="hello conv",
@@ -1553,3 +1649,215 @@ async def test_store_stats_unread_count_consistent():
     stats = json.loads(result[0].text)
     unread_list = _store_mod.get_unread_messages(own_number=own)
     assert stats["unread_messages"] == len(unread_list) == 1
+
+
+# ── SIGNAL_MCP_READONLY ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_tools_full_when_readonly_unset(monkeypatch):
+    from signal_mcp.server import _list_tools, TOOLS
+    from mcp.types import RequestParams
+    monkeypatch.delenv("SIGNAL_MCP_READONLY", raising=False)
+    monkeypatch.setattr("signal_mcp.server._READONLY", False)
+
+    result = await _list_tools(None, RequestParams())
+    names = {t.name for t in result.tools}
+    assert len(result.tools) == len(TOOLS)
+    assert "send_message" in names
+    assert "delete_message" in names
+
+
+@pytest.mark.asyncio
+async def test_list_tools_excludes_write_tools_when_readonly(monkeypatch):
+    from signal_mcp.server import _list_tools
+    from mcp.types import RequestParams
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+
+    result = await _list_tools(None, RequestParams())
+    names = {t.name for t in result.tools}
+    assert "send_message" not in names
+    assert "delete_message" not in names
+    assert "list_contacts" in names
+    assert "get_conversation" in names
+
+
+@pytest.mark.asyncio
+async def test_call_tool_rejects_write_tool_when_readonly(monkeypatch, reset_client):
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+    spy = MagicMock()
+    async def tracked_send_message(*a, **kw):
+        spy()
+        raise AssertionError("send_message should not be called in read-only mode")
+    monkeypatch.setattr(reset_client, "send_message", tracked_send_message)
+
+    result = await call_tool("send_message", {"recipient": "+19999999999", "message": "Hi"})
+    assert "read-only mode" in result[0].text
+    spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_allows_read_only_tool_when_readonly(monkeypatch):
+    monkeypatch.setattr("signal_mcp.server._READONLY", True)
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    result = await call_tool("list_contacts", {})
+    assert "read-only mode" not in result[0].text
+
+
+# ── webhook, find_contact, scheduled messages ──────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def isolate_webhook_config(monkeypatch, tmp_path):
+    """Keep webhook config tests off the real ~/.local/share/signal-mcp/webhook.json."""
+    monkeypatch.setattr(_config_mod, "WEBHOOK_CONFIG_FILE", tmp_path / "webhook.json")
+    monkeypatch.delenv("SIGNAL_MCP_WEBHOOK", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_tool_set_webhook_and_get_webhook():
+    result = await call_tool("set_webhook", {"url": "http://localhost:5678/webhook/signal"})
+    data = json.loads(result[0].text)
+    assert data["status"] == "webhook set"
+    assert data["url"] == "http://localhost:5678/webhook/signal"
+
+    result = await call_tool("get_webhook", {})
+    data = json.loads(result[0].text)
+    assert data["url"] == "http://localhost:5678/webhook/signal"
+
+
+@pytest.mark.asyncio
+async def test_tool_set_webhook_clear():
+    await call_tool("set_webhook", {"url": "http://localhost:5678/webhook/signal"})
+    result = await call_tool("set_webhook", {"url": None})
+    data = json.loads(result[0].text)
+    assert data["status"] == "webhook cleared"
+
+    result = await call_tool("get_webhook", {})
+    data = json.loads(result[0].text)
+    assert data["url"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_find_contact_missing_query():
+    result = await call_tool("find_contact", {})
+    assert result[0].text.startswith("Error:")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_find_contact_matches():
+    contacts_data = [
+        {"number": "+19999999999", "name": "Alice"},
+    ]
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(contacts_data)))
+    result = await call_tool("find_contact", {"query": "Alice"})
+    data = json.loads(result[0].text)
+    assert len(data) == 1
+    assert data[0]["number"] == "+19999999999"
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_missing_fields():
+    result = await call_tool("schedule_message", {"message": "hi"})
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_missing_recipient_and_group():
+    result = await call_tool("schedule_message", {"message": "hi", "send_at": "2999-01-01T09:00:00"})
+    assert "recipient" in result[0].text or "group_id" in result[0].text
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_at", [
+    "2999-06-01T09:00:00",
+    "2999-06-01 09:00:00",
+    "2999-06-01 09:00",
+    "2999-06-01T09:00",
+])
+async def test_tool_schedule_message_accepted_date_formats(send_at):
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": send_at, "recipient": "+19999999999",
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "scheduled"
+    assert "job_id" in data
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_invalid_format():
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "not-a-date", "recipient": "+19999999999",
+    })
+    assert result[0].text.startswith("Error:")
+    assert "Invalid send_at format" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_schedule_message_in_past():
+    result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2000-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    assert result[0].text.startswith("Error:")
+    assert "must be in the future" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_list_scheduled_messages():
+    await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2999-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    result = await call_tool("list_scheduled_messages", {})
+    data = json.loads(result[0].text)
+    assert len(data) == 1
+    assert data[0]["message"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_missing_job_id():
+    result = await call_tool("cancel_scheduled_message", {})
+    assert result[0].text.startswith("Error:")
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_success():
+    schedule_result = await call_tool("schedule_message", {
+        "message": "hi", "send_at": "2999-01-01T09:00:00", "recipient": "+19999999999",
+    })
+    job_id = json.loads(schedule_result[0].text)["job_id"]
+    result = await call_tool("cancel_scheduled_message", {"job_id": job_id})
+    data = json.loads(result[0].text)
+    assert data["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_tool_cancel_scheduled_message_not_found():
+    result = await call_tool("cancel_scheduled_message", {"job_id": 999999})
+    assert result[0].text.startswith("Error:")
+    assert "No pending scheduled message" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_tool_run_scheduled_messages(reset_client):
+    async def fake_process():
+        return [{"id": 1, "status": "sent", "timestamp": 1234}]
+    reset_client.process_scheduled_messages = fake_process
+
+    result = await call_tool("run_scheduled_messages", {})
+    data = json.loads(result[0].text)
+    assert data["processed"] == 1
+    assert data["results"][0]["status"] == "sent"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_submit_rate_limit_challenge():
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok({})))
+    result = await call_tool("submit_rate_limit_challenge", {
+        "challenge": "chal-token", "captcha": "captcha-token",
+    })
+    data = json.loads(result[0].text)
+    assert data["status"] == "challenge submitted"
+    req_body = json.loads(respx.calls[-1].request.content)
+    assert req_body["params"]["challenge"] == "chal-token"
+    assert req_body["params"]["captcha"] == "captcha-token"

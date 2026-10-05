@@ -160,11 +160,18 @@ Restart Claude Code. Signal tools appear automatically — ask Claude *"check my
 
 ### Step 5 — (Optional) Import Signal Desktop history
 
-If you use Signal Desktop on macOS, import your full message history in one command:
+If you use Signal Desktop, import your full message history in one command.
 
+**macOS**
 ```bash
 brew install sqlcipher       # required for decryption
 signal-mcp import-desktop    # macOS will prompt for Keychain access — click Allow
+```
+
+**Linux** (Debian/Ubuntu shown — use your distribution's packages elsewhere)
+```bash
+sudo apt install sqlcipher libsecret-tools   # decryption + keyring lookup (secret-tool)
+signal-mcp import-desktop                    # your keyring must be unlocked
 ```
 
 ### Step 6 — (Optional) Enable background message capture
@@ -174,6 +181,15 @@ signal-cli only delivers messages when polled. Install the background service so
 ```bash
 signal-mcp install-service   # starts on login, works on macOS and Linux
 ```
+
+### Step 7 — (Optional) Read-only mode
+
+Set `SIGNAL_MCP_READONLY=1` in the environment to restrict the server to read-only
+tools (listing, searching, and exporting existing local/remote state). Tools that
+send, edit, delete, or otherwise mutate your Signal account — messages, contacts,
+groups, devices, and settings — are hidden from tool listings and rejected if
+called directly. Useful when connecting an AI client you don't fully trust with
+write access to your real Signal account.
 
 ## MCP Tools
 
@@ -244,7 +260,7 @@ signal-mcp install-service   # starts on login, works on macOS and Linux
 |---|---|
 | `list_conversations` | All conversations ordered by most recent message. |
 | `get_conversation` | Message history with a contact or group. Supports `since`, `limit`, and `offset` for pagination. |
-| `search_messages` | Full-text search (FTS5) across all stored messages. Supports `sender`, `limit`, and `offset`. |
+| `search_messages` | Full-text search (FTS5) across all stored messages. Supports `sender`, `since`/`until` (ISO date range; `until` exclusive), `limit`, and `offset`. |
 | `store_stats` | Total message count, oldest and newest message dates. |
 | `mark_as_unread` | Mark one or more stored messages as unread. |
 | `get_user_status` | Check whether phone numbers are registered Signal users. |
@@ -299,6 +315,7 @@ signal-mcp install-service   # starts on login, works on macOS and Linux
 ```bash
 # Status & daemon
 signal-mcp status                          # account + daemon info
+signal-mcp doctor                          # onboarding smoke test: signal-cli, account, daemon, receive health
 signal-mcp daemon                          # start daemon in foreground
 signal-mcp stop                            # stop the daemon
 
@@ -367,7 +384,7 @@ signal-mcp install-service   # background watcher, auto-starts on login
 
 **Retroactively** (imports everything from Signal Desktop):
 ```bash
-signal-mcp import-desktop    # macOS will prompt for Keychain access — click Allow
+signal-mcp import-desktop    # macOS prompts for Keychain access; Linux needs an unlocked keyring
 ```
 
 Run both for complete coverage.
@@ -458,7 +475,7 @@ Plus tools with no direct signal-cli equivalent: `get_conversation`, `search_mes
 
 ### Not covered
 
-These commands are deliberately excluded — they are not feasible to implement as MCP tools:
+These commands are deliberately excluded — either not feasible to implement as MCP tools, or consciously left out (see the reason for each):
 
 | signal-cli command | Why |
 |---|---|
@@ -466,6 +483,8 @@ These commands are deliberately excluded — they are not feasible to implement 
 | `register` / `verify` / `link` / `unregister` | One-time account setup; must be done before installing signal-mcp |
 | `deleteLocalAccountData` | Irreversibly destroys all local Signal data; too destructive to expose |
 | `sendPaymentNotification` | MobileCoin payments (requires a funded wallet; out of scope) |
+| `sendStory` | Added in signal-cli 0.14.6. Feasible, but consciously not added — no use case yet |
+| `terminateGroup` | Added in signal-cli 0.14.8 (GroupsV2 "end group"). Feasible, but consciously not added — irreversible for every member, so it would need a confirmation gate like `clear_local_store` |
 
 ## Development
 

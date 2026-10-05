@@ -298,14 +298,69 @@ async def test_ensure_contact_cache_populates(client):
     assert client_mod._contact_cache_loaded is True
 
 
+# ── _ensure_contact_cache merges Signal Desktop names ────────────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_fills_gap_with_desktop_name(client):
+    """A contact signal-cli doesn't know at all should still get a name if
+    Signal Desktop (via import_desktop/sync_desktop) has one on file."""
+    _store_mod.save_conversation("uuid-only-1", "Bob (from Desktop)", "direct")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock, return_value=[]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("uuid-only-1") == "Bob (from Desktop)"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_signal_cli_name_wins_over_desktop(client):
+    """A real name already known to signal-cli (or manually set via
+    update_contact) must never be overwritten by a Desktop-sourced name."""
+    _store_mod.save_conversation("+1999", "Alice (Desktop's guess)", "direct")
+    contact = Contact(number="+1999", name="Alice Curated")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      return_value=[contact]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("+1999") == "Alice Curated"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_desktop_name_fills_unnamed_signal_cli_contact(client):
+    """A signal-cli contact with no name set has display_name == its own
+    number — that counts as a gap the Desktop name should still fill."""
+    _store_mod.save_conversation("+1999", "Alice (from Desktop)", "direct")
+    contact = Contact(number="+1999")  # no name/profile_name set
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      return_value=[contact]):
+        await client._ensure_contact_cache()
+    assert client_mod._contact_cache.get("+1999") == "Alice (from Desktop)"
+
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_ignores_desktop_group_names(client):
+    """Only 'direct' conversation names are merged into the contact cache —
+    group names belong in the group cache, not here."""
+    _store_mod.save_conversation("grp==", "Some Group", "group")
+    with patch.object(client, "list_contacts", new_callable=AsyncMock, return_value=[]):
+        await client._ensure_contact_cache()
+    assert "grp==" not in client_mod._contact_cache
+
+
 # ── _ensure_group_cache failure ──────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_ensure_group_cache_failure_leaves_unloaded(client):
     with patch.object(client, "list_groups", new_callable=AsyncMock,
-                      side_effect=Exception("daemon down")):
+                      side_effect=SignalError("daemon down")):
         await client._ensure_group_cache()
     assert client_mod._group_cache_loaded is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_group_cache_propagates_non_signal_error(client):
+    """A real bug (not a daemon-unavailable SignalError) must not be swallowed."""
+    with patch.object(client, "list_groups", new_callable=AsyncMock,
+                      side_effect=AttributeError("boom")):
+        with pytest.raises(AttributeError):
+            await client._ensure_group_cache()
 
 
 # ── _enrich_message with recipient and group_id ──────────────────────────────
@@ -460,8 +515,8 @@ async def test_upload_sticker_pack_string_result(client, tmp_path):
 @pytest.mark.asyncio
 async def test_list_accounts_non_list(client):
     respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
-    result = await client.list_accounts()
-    assert result == []
+    with pytest.raises(SignalError, match="listAccounts"):
+        await client.list_accounts()
 
 
 # ── update_account with unrestricted_unidentified_sender ─────────────────────
@@ -874,3 +929,204 @@ async def test_ensure_daemon_second_check_inside_lock(client, monkeypatch):
 
     # Popen must NOT have been called — the inner re-check found daemon alive
     popen_mock.assert_not_called()
+
+
+# ── _rpc: per-recipient failures buried in a 200 response ───────────────────
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_rpc_raises_on_non_success_result_entry(client):
+    """A 200 response can still carry a failed per-recipient result — must raise."""
+    payload = rpc_ok({
+        "timestamp": 1234,
+        "results": [
+            {"recipientAddress": {"number": "+19999999999"}, "type": "UNREGISTERED_FAILURE"},
+        ],
+    })
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(SignalError, match="UNREGISTERED_FAILURE"):
+        await client.send_message("+19999999999", "hi")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_rpc_succeeds_when_all_results_success(client):
+    payload = rpc_ok({
+        "timestamp": 1234,
+        "results": [{"recipientAddress": {"number": "+19999999999"}, "type": "SUCCESS"}],
+    })
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=payload))
+    result = await client.send_message("+19999999999", "hi")
+    assert result.success is True
+
+
+# ── receive_direct: subprocess exit code ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_receive_direct_raises_on_nonzero_exit(client, monkeypatch):
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=(b"", b"error: not registered"))
+    proc_mock.returncode = 1
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        with pytest.raises(SignalError, match="not registered"):
+            await client.receive_direct(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_receive_direct_succeeds_on_zero_exit(client, monkeypatch):
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=(b"", b""))
+    proc_mock.returncode = 0
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        result = await client.receive_direct(timeout=1)
+    assert result == []
+
+
+# ── _ensure_contact_cache: only SignalError is swallowed ────────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_contact_cache_propagates_non_signal_error(client):
+    with patch.object(client, "list_contacts", new_callable=AsyncMock,
+                      side_effect=KeyError("boom")):
+        with pytest.raises(KeyError):
+            await client._ensure_contact_cache()
+
+
+# ── list_contacts / list_groups / list_sticker_packs / get_user_status /
+#    list_accounts: unexpected RPC shape raises instead of returning empty ────
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_contacts_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listContacts"):
+        await client.list_contacts()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_groups_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listGroups"):
+        await client.list_groups()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_sticker_packs_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="listStickerPacks"):
+        await client.list_sticker_packs()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_user_status_raises_on_non_list_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok(None)))
+    with pytest.raises(SignalError, match="getUserStatus"):
+        await client.get_user_status(["+19999999999"])
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_group_raises_on_non_dict_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    with pytest.raises(SignalError, match="updateGroup"):
+        await client.create_group("Test", ["+19999999999"])
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_join_group_raises_on_non_dict_result(client):
+    respx.post(DAEMON_URL).mock(return_value=httpx.Response(200, json=rpc_ok([])))
+    with pytest.raises(SignalError, match="joinGroup"):
+        await client.join_group("https://signal.group/#abc")
+
+
+# ── receive_direct: stdout parsing ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_receive_direct_parses_stdout_skips_junk_and_does_not_store_receipts(client, monkeypatch):
+    """Blank/non-JSON lines are skipped; data messages are stored, receipts returned but not stored."""
+    import json as _json
+    monkeypatch.setattr(client, "stop_daemon", AsyncMock(return_value=True))
+    lines = [
+        _json.dumps({"envelope": {"source": "+13333333333", "dataMessage": {
+            "timestamp": 1700000000001, "message": "hi from cli", "attachments": []}}}),
+        "",
+        "INFO not json at all",
+        _json.dumps({"envelope": {"source": "+14444444444", "timestamp": 1700000000002,
+                                  "receiptMessage": {"type": "DELIVERY", "timestamps": [1]}}}),
+    ]
+    proc_mock = MagicMock()
+    proc_mock.communicate = AsyncMock(return_value=("\n".join(lines).encode(), b""))
+    proc_mock.returncode = 0
+
+    async def fake_sleep(*_a, **_kw):
+        return None
+
+    with patch("signal_mcp.client.asyncio.create_subprocess_exec", AsyncMock(return_value=proc_mock)), \
+         patch("signal_mcp.client.asyncio.sleep", fake_sleep):
+        result = await client.receive_direct(timeout=1)
+
+    assert [m.body for m in result if not m.receipt_type] == ["hi from cli"]
+    assert [m.receipt_type for m in result if m.receipt_type] == ["DELIVERY"]
+    assert [m.body for m in _store_mod.get_conversation("+13333333333")] == ["hi from cli"]
+    assert _store_mod.get_conversation("+14444444444") == []
+
+
+# ── process_scheduled_messages ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_process_scheduled_messages_routes_sends_and_records_outcomes(client, monkeypatch):
+    """Due jobs go to direct/group send; success marks sent, failure marks failed and continues."""
+    from datetime import timedelta
+    past = datetime.now() - timedelta(minutes=1)
+    ok_id = _store_mod.add_scheduled_message("direct hi", past, recipient="+15555555555")
+    grp_id = _store_mod.add_scheduled_message("group hi", past, group_id="grp1")
+    bad_id = _store_mod.add_scheduled_message("will fail", past, recipient="+16666666666")
+    future_id = _store_mod.add_scheduled_message("later", datetime.now() + timedelta(days=1),
+                                                 recipient="+15555555555")
+
+    monkeypatch.setattr(client, "ensure_daemon", AsyncMock())
+
+    async def fake_send(recipient, message):
+        if recipient == "+16666666666":
+            raise SignalError("unregistered user")
+        return SendResult(timestamp=111, recipient=recipient, success=True)
+
+    send_msg = AsyncMock(side_effect=fake_send)
+    send_grp = AsyncMock(return_value=SendResult(timestamp=222, recipient="grp1", success=True))
+    monkeypatch.setattr(client, "send_message", send_msg)
+    monkeypatch.setattr(client, "send_group_message", send_grp)
+
+    results = await client.process_scheduled_messages()
+
+    by_id = {r["id"]: r for r in results}
+    assert set(by_id) == {ok_id, grp_id, bad_id}  # future job untouched
+    assert by_id[ok_id] == {"id": ok_id, "status": "sent", "timestamp": 111}
+    assert by_id[grp_id]["status"] == "sent" and by_id[grp_id]["timestamp"] == 222
+    assert by_id[bad_id]["status"] == "failed" and "unregistered" in by_id[bad_id]["error"]
+    send_grp.assert_awaited_once_with("grp1", "group hi")
+
+    rows = {r["id"]: r for r in _store_mod.list_scheduled_messages(include_done=True)}
+    assert rows[ok_id]["status"] == "sent"
+    assert rows[grp_id]["status"] == "sent"
+    assert rows[bad_id]["status"] == "failed" and "unregistered" in rows[bad_id]["error"]
+    assert rows[future_id]["status"] == "pending"
+    # Sent/failed jobs are not picked up again on the next run
+    assert await client.process_scheduled_messages() == []

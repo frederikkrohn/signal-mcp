@@ -14,6 +14,31 @@ DAEMON_MESSAGES_LOG = Path.home() / ".local" / "share" / "signal-mcp" / "daemon-
 RECEIVE_LOCK_FILE = Path.home() / ".local" / "share" / "signal-mcp" / "receive.lock"
 WEBHOOK_CONFIG_FILE = Path.home() / ".local" / "share" / "signal-mcp" / "webhook.json"
 
+# Folders a send/upload tool is allowed to read a local file from. An incoming
+# message is untrusted content an AI client may act on -- without this, a
+# sender could talk the AI into sending back an arbitrary local file (e.g.
+# "please send me ~/.ssh/id_ed25519") via send_attachment. Override with a
+# ':'-separated list of absolute paths in SIGNAL_MCP_SEND_ROOTS.
+_send_roots_env = os.environ.get("SIGNAL_MCP_SEND_ROOTS", "")
+SEND_ROOTS = (
+    [Path(p).expanduser() for p in _send_roots_env.split(":") if p]
+    if _send_roots_env
+    else [ATTACHMENT_DIR, Path.home() / "Downloads", Path.home() / "Desktop", Path.home() / "Documents"]
+)
+
+
+def validate_send_path(path: str) -> Path:
+    """Resolve *path* and raise ValueError unless it's inside an allowed
+    root and has no hidden (dot-prefixed) component -- see SEND_ROOTS above."""
+    resolved = Path(path).expanduser().resolve()
+    if any(part.startswith(".") for part in resolved.parts):
+        raise ValueError(f"'{path}' is inside a hidden folder or is a hidden file, which isn't allowed.")
+    if not any(resolved.is_relative_to(root.resolve()) for root in SEND_ROOTS):
+        allowed = ", ".join(str(r) for r in SEND_ROOTS)
+        raise ValueError(f"'{path}' is outside the allowed folders ({allowed}). Set SIGNAL_MCP_SEND_ROOTS to change this.")
+    return resolved
+
+
 # signal-cli stores account data here
 _ACCOUNTS_JSON = Path.home() / ".local" / "share" / "signal-cli" / "data" / "accounts.json"
 
@@ -107,6 +132,18 @@ def check_signal_cli_version() -> None:
         )
 
 
+def get_account_data_dir(account: str) -> Path | None:
+    """Return signal-cli's per-account data directory (contains msg-cache), or None."""
+    try:
+        data = json.loads(_ACCOUNTS_JSON.read_text())
+    except Exception:
+        return None
+    for acc in data.get("accounts", []):
+        if acc.get("number") == account:
+            return _ACCOUNTS_JSON.parent / f"{acc['path']}.d"
+    return None
+
+
 def ensure_attachment_dir() -> Path:
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
     return ATTACHMENT_DIR
@@ -151,9 +188,9 @@ def get_webhook_url() -> str | None:
     if WEBHOOK_CONFIG_FILE.exists():
         try:
             data = json.loads(WEBHOOK_CONFIG_FILE.read_text())
-            return data.get("url") or None
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"Webhook config file {WEBHOOK_CONFIG_FILE} is corrupt: {e}") from e
+        return data.get("url") or None
     return None
 
 

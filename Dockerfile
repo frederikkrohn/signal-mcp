@@ -19,10 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # ── signal-cli ─────────────────────────────────────────────────────────────────
-ARG SIGNAL_CLI_VERSION=0.14.3
+ARG SIGNAL_CLI_VERSION=0.14.8
+# The Linux-native tarball contains a single top-level `signal-cli` executable (x86-64 only).
 RUN curl -fsSL \
     "https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}-Linux-native.tar.gz" \
-    | tar -xz -C /usr/local/bin --strip-components=1 signal-cli-${SIGNAL_CLI_VERSION}-Linux-native/bin/signal-cli \
+    | tar -xz -C /usr/local/bin signal-cli \
  && chmod +x /usr/local/bin/signal-cli
 
 # ── signal-mcp ─────────────────────────────────────────────────────────────────
